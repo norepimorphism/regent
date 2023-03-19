@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "regent"
+version = "0.1.0"
+authors = ["norepimorphism <norepi@protonmail.com>"]
+edition = "2021"
+description = "Bitfields in Rust"
+repository = "https://github.com/norepimorphism/noctane"
+license = "MPL-2.0"
+
+[dependencies]
+regent-internals = { path = "../regent-internals" }

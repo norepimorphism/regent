@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "regent-internals"
+version = "0.1.0"
+authors = ["norepimorphism <norepi@protonmail.com>"]
+edition = "2021"
+description = "Internal proc macros for the regent crate"
+readme = false
+repository = "https://github.com/norepimorphism/noctane"
+license = "MPL-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+darling = "0.14"
+quote = { version = "1.0", default-features = false }
+syn = { version = "1.0", default-features = false, features = ["full"] }
