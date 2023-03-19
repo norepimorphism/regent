@@ -5,7 +5,16 @@
 //! [cxd8]: https://crates.io/crates/regent
 
 use proc_macro::TokenStream;
-use quote::{__private::{Ident as Ident2, Span as Span2, TokenStream as TokenStream2, TokenTree as TokenTree2}, quote, ToTokens as _};
+use quote::{
+    __private::{
+        Ident as Ident2,
+        Span as Span2,
+        TokenStream as TokenStream2,
+        TokenTree as TokenTree2,
+    },
+    quote,
+    ToTokens as _,
+};
 
 /// Like [`try`](std::try) except the 'OK' and 'error' types are one and the same.
 macro_rules! try_ {
@@ -61,11 +70,7 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut item_new_stmts = Vec::new();
     for field in item_fields {
         let syn::Field {
-            attrs: field_attrs,
-            ident: field_ident,
-            ty: field_ty,
-            vis: field_vis,
-            ..
+            attrs: field_attrs, ident: field_ident, ty: field_ty, vis: field_vis, ..
         } = field;
 
         let Some(field_ident) = field_ident else {
@@ -175,10 +180,7 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
 enum Type {
     Prime(PrimeType),
     Tuple(Vec<PrimeType>),
-    Array {
-        ty: PrimeType,
-        len: usize,
-    }
+    Array { ty: PrimeType, len: usize },
 }
 
 impl Type {
@@ -186,14 +188,16 @@ impl Type {
         match ty {
             syn::Type::Path(ty) => PrimeType::parse(span, ty).map(Self::Prime),
             syn::Type::Tuple(syn::TypeTuple { elems: tys, .. }) => {
-                let tys = tys.iter().map(|ty| {
-                    if let syn::Type::Path(ty) = ty {
-                        PrimeType::parse(span, ty)
-                    } else {
-                        Err(make_error(span, "tuple element type must be a path"))
-                    }
-                })
-                .collect::<Result<Vec<PrimeType>, _>>()?;
+                let tys = tys
+                    .iter()
+                    .map(|ty| {
+                        if let syn::Type::Path(ty) = ty {
+                            PrimeType::parse(span, ty)
+                        } else {
+                            Err(make_error(span, "tuple element type must be a path"))
+                        }
+                    })
+                    .collect::<Result<Vec<PrimeType>, _>>()?;
 
                 Ok(Self::Tuple(tys))
             }
@@ -205,7 +209,8 @@ impl Type {
                 let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(len), .. }) = len else {
                     return Err(make_error(span, "array length must be an integer literal"));
                 };
-                let len = len.base10_parse().map_err(|e| TokenStream::from(e.into_compile_error()))?;
+                let len =
+                    len.base10_parse().map_err(|e| TokenStream::from(e.into_compile_error()))?;
 
                 Ok(Self::Array { ty, len })
             }
@@ -261,11 +266,9 @@ impl PrimeType {
     }
 
     fn parse_uint(span: Span2, width: &str) -> Result<Self, TokenStream> {
-        let width = width
-            .parse::<usize>()
-            .map_err(|_| {
-                make_error(span, "the type of this field has an invalid integer suffix")
-            })?;
+        let width = width.parse::<usize>().map_err(|_| {
+            make_error(span, "the type of this field has an invalid integer suffix")
+        })?;
         if width == 0 {
             return Err(make_error(span, "this field is zero-sized, which is not supported"))?;
         }
@@ -334,6 +337,9 @@ impl UIntType {
 
 impl quote::ToTokens for UIntType {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        tokens.extend([TokenTree2::Ident(Ident2::new(&format!("u{}", self.width), Span2::mixed_site()))]);
+        tokens.extend([TokenTree2::Ident(Ident2::new(
+            &format!("u{}", self.width),
+            Span2::mixed_site(),
+        ))]);
     }
 }
