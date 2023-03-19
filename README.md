@@ -1,4 +1,4 @@
-# ![Regent](resources/regent.png)
+# ![Regent](resources/regent@0.5x.png)
 
 Bitfields in Rust.
 
