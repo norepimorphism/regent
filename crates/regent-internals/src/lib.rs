@@ -10,7 +10,6 @@ use quote::{
         Ident as Ident2,
         Span as Span2,
         TokenStream as TokenStream2,
-        TokenTree as TokenTree2,
     },
     quote,
     ToTokens as _,
@@ -82,21 +81,20 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
             fail!(field_span, "attributes are not (yet) supported on struct fields");
         }
 
-        let mut field_ty = try_!(Type::parse(field_span, &field_ty));
-        let field_width = field_ty.width();
-        let field_repr = if let Type::Prime(PrimeType::UInt(ref mut uint)) = field_ty {
-            *uint = uint.round_up();
-
-            // For an unsigned integer type, `field_repr` is the same as `field_ty`.
-            *uint
-        } else {
-            UIntType { width: field_width }.round_up()
-        };
+        let field_ty = try_!(Type::parse(field_span, &field_ty));
+        let field_repr = field_ty.repr();
         if !field_repr.exists() {
             fail!(field_span, "this field cannot be represented by any primitive integer type");
         }
+        let field_width = field_repr.width;
+        let field_getter_glue = field_ty.field_getter_glue(field_width);
+        let field_setter_glue = field_ty.field_setter_glue();
 
-        let field_ty = field_ty.into_token_stream();
+        let field_ty = if matches!(field_ty, Type::Prime(PrimeType::UInt(_))) {
+            field_repr.into_token_stream()
+        } else {
+            field_ty.into_token_stream()
+        };
         let field_offset = item_width;
         let field_getter_ident = quote!(#field_ident);
         let field_setter_ident = Ident2::new(&format!("set_{field_ident}"), field_span);
@@ -108,21 +106,26 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 let rebased = self.0 >> (REPR_WIDTH - #field_offset);
                 let mask: Repr = !0 >> (REPR_WIDTH - #field_width);
+                let mut field_as_repr: #field_repr = (rebased & mask) as _;
 
-                (rebased & mask) as _
+                let mut field: #field_ty;
+                #field_getter_glue
+
+                field
             }
 
             #field_vis fn #field_setter_ident(&mut self, value: #field_ty) {
                 #fn_prelude
 
-                let mut value: #field_repr = value as _;
+                let mut value_as_repr: #field_repr;
+                #field_setter_glue
 
                 let mut mask: Repr = !0;
                 mask >>= REPR_WIDTH - #field_width;
-                value &= mask as #field_repr;
+                value_as_repr &= mask as #field_repr;
                 mask <<= #field_offset;
                 self.0 &= !mask;
-                self.0 |= (value as Repr) << #field_offset;
+                self.0 |= (value_as_repr as Repr) << #field_offset;
             }
         });
         item_new_args.push(quote!(#field_ident: #field_ty));
@@ -156,7 +159,7 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#item_fns)*
         }
 
-        impl ::regent::Bitwise for #item_ident {
+        impl Bitwise for #item_ident {
             const WIDTH: usize = #item_width;
 
             type Repr = #item_repr;
@@ -218,11 +221,76 @@ impl Type {
         }
     }
 
+    fn repr(&self) -> UIntType {
+        if let Type::Prime(PrimeType::UInt(ty)) = self {
+            ty.round_up()
+        } else {
+            UIntType { width: self.width() }.round_up()
+        }
+    }
+
     fn width(&self) -> usize {
         match self {
             Self::Prime(ty) => ty.width(),
             Self::Tuple(tys) => tys.iter().map(|ty| ty.width()).sum(),
             Self::Array { ty, len } => ty.width() * len,
+        }
+    }
+
+    fn field_getter_glue(&self, field_width: usize) -> TokenStream2 {
+        match self {
+            Self::Prime(ty) => ty.field_getter_glue(),
+            Self::Tuple(tys) => {
+                let mut result = TokenStream2::new();
+                for (i, ty) in tys.iter().enumerate().rev() {
+                    let ty_width = ty.width();
+                    result.extend(quote! {
+                        field.#i = (field_as_repr & (!0 >> (#field_width - #ty_width))) as #ty;
+                        field_as_repr >>= #ty_width;
+                    });
+                }
+
+                result
+            }
+            Self::Array { ty, len } => {
+                let ty_width = ty.width();
+
+                quote! {
+                    for i in (0..#len).rev() {
+                        field[i] = (field_as_repr & (!0 >> (#field_width - #ty_width))) as #ty;
+                        field_as_repr >>= #ty_width;
+                    }
+                }
+            }
+        }
+    }
+
+    fn field_setter_glue(&self) -> TokenStream2 {
+        match self {
+            Self::Prime(ty) => ty.field_setter_glue(),
+            Self::Tuple(tys) => {
+                let mut result = TokenStream2::new();
+                for (i, ty) in tys.iter().enumerate() {
+                    let ty_width = ty.width();
+                    result.extend(quote! {
+                        value_as_repr |= value.#i as _;
+                        value_as_repr <<= #ty_width;
+                    });
+                }
+
+                result
+            }
+            Self::Array { ty, len } => {
+                let ty_width = ty.width();
+
+                quote! {
+                    value_as_repr = 0;
+                    for i in 0..#len {
+                        value_as_repr |= value[i] as _;
+                        value_as_repr <<= #ty_width;
+                    }
+                }
+            }
         }
     }
 }
@@ -258,30 +326,31 @@ impl PrimeType {
             } else if ty == "char" {
                 return Ok(Self::Char);
             } else if let Some(("", width)) = ty.split_once("u") {
-                return Self::parse_uint(span, width);
+                return UIntType::parse(span, width).map(Self::UInt);
             }
         }
 
         Err(make_error(span, "the type of this field is not supported"))
     }
 
-    fn parse_uint(span: Span2, width: &str) -> Result<Self, TokenStream> {
-        let width = width.parse::<usize>().map_err(|_| {
-            make_error(span, "the type of this field has an invalid integer suffix")
-        })?;
-        if width == 0 {
-            return Err(make_error(span, "this field is zero-sized, which is not supported"))?;
-        }
-
-        Ok(Self::UInt(UIntType { width }))
-    }
-
-    fn width(&self) -> usize {
-        match *self {
+    fn width(self) -> usize {
+        match self {
             Self::Bool => 1,
             Self::Char => 8,
             Self::UInt(ty) => ty.width,
         }
+    }
+
+    fn field_getter_glue(self) -> TokenStream2 {
+        if matches!(self, Self::Bool) {
+            quote! { field = field_as_repr == 1; }
+        } else {
+            quote! { field = field_as_repr as _; }
+        }
+    }
+
+    fn field_setter_glue(self) -> TokenStream2 {
+        quote! { value_as_repr = value as _; }
     }
 }
 
@@ -307,6 +376,17 @@ struct UIntType {
 }
 
 impl UIntType {
+    fn parse(span: Span2, width: &str) -> Result<Self, TokenStream> {
+        let width = width.parse().map_err(|_| {
+            make_error(span, "the type of this field has an invalid integer suffix")
+        })?;
+        if width == 0 {
+            return Err(make_error(span, "this field is zero-sized, which is not supported"))?;
+        }
+
+        Ok(Self { width })
+    }
+
     fn round_up(self) -> Self {
         let width = if self.width <= 8 {
             8
@@ -337,9 +417,9 @@ impl UIntType {
 
 impl quote::ToTokens for UIntType {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        tokens.extend([TokenTree2::Ident(Ident2::new(
+        tokens.extend((Ident2::new(
             &format!("u{}", self.width),
             Span2::mixed_site(),
-        ))]);
+        )).into_token_stream());
     }
 }
