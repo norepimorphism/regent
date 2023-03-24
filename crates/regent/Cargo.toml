@@ -13,4 +13,4 @@ keywords = ["bitfield"]
 categories = ["data-structures", "encoding"]
 
 [dependencies]
-regent-internals = { path = "../regent-internals" }
+regent-internals = { path = "../regent-internals", version = "0.1.0" }
