@@ -25,7 +25,7 @@ fn test_constant_fields() {
         u7,
         #[constant(value = "144")]
         u8,
-        #[constant(value = "false")]
+        #[constant]
         bool,
     );
 }

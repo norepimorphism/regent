@@ -96,21 +96,6 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
         let field_ident = &field_getter_ident;
         let field_span = field_getter_ident.span();
 
-        let mut field_value = None;
-        for attr in field_attrs {
-            let metas = darling::util::parse_attribute_to_meta_list(&attr).unwrap();
-            if metas.path.is_ident("constant") {
-                let nested_metas: Vec<_> = metas.nested.into_iter().collect();
-                let attr = ConstantAttr::from_list(&nested_metas).unwrap();
-                field_value = Some(match attr.value {
-                    Some(it) => syn::parse_str::<syn::Expr>(&it).unwrap().into_token_stream(),
-                    None => quote!(Default::default()),
-                });
-            } else {
-                fail!(field_span, "encountered unexpected field attribute")
-            }
-        }
-
         let field_ty = unwrap!(Type::parse(field_span, &field_ty));
         match field_ty {
             Type::Tuple(ref tys) => if tys.is_empty() {
@@ -123,6 +108,25 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         let field_width = field_ty.width();
+
+        let mut field_value = None;
+        for attr in field_attrs {
+            let metas = darling::util::parse_attribute_to_meta_list(&attr).unwrap();
+            if metas.path.is_ident("constant") {
+                let nested_metas: Vec<_> = metas.nested.into_iter().collect();
+                let attr = ConstantAttr::from_list(&nested_metas).unwrap();
+                field_value = Some(match attr.value {
+                    Some(it) => syn::parse_str::<syn::Expr>(&it).unwrap().into_token_stream(),
+                    None => {
+                        let field_ty = field_ty.as_rust_primitives();
+
+                        quote! { (<#field_ty as ::core::default::Default>::default()) }
+                    }
+                });
+            } else {
+                fail!(field_span, "encountered unexpected field attribute")
+            }
+        }
 
         if let Some(field_value) = field_value {
             let new_glue = field_ty.field_setter_glue(
