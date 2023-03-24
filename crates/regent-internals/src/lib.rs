@@ -4,6 +4,7 @@
 //!
 //! [Regent]: https://crates.io/crates/regent
 
+use darling::FromMeta as _;
 use proc_macro::TokenStream;
 use quote::{
     __private::{Span as Span2, TokenStream as TokenStream2},
@@ -95,8 +96,19 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
         let field_ident = &field_getter_ident;
         let field_span = field_getter_ident.span();
 
-        if !field_attrs.is_empty() {
-            fail!(field_span, "attributes are not (yet) supported on struct fields");
+        let mut field_value = None;
+        for attr in field_attrs {
+            let metas = darling::util::parse_attribute_to_meta_list(&attr).unwrap();
+            if metas.path.is_ident("constant") {
+                let nested_metas: Vec<_> = metas.nested.into_iter().collect();
+                let attr = ConstantAttr::from_list(&nested_metas).unwrap();
+                field_value = Some(match attr.value {
+                    Some(it) => syn::parse_str::<syn::Expr>(&it).unwrap().into_token_stream(),
+                    None => quote!(Default::default()),
+                });
+            } else {
+                fail!(field_span, "encountered unexpected field attribute")
+            }
         }
 
         let field_ty = unwrap!(Type::parse(field_span, &field_ty));
@@ -112,54 +124,69 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         let field_width = field_ty.width();
 
-        let field_getter_glue =
-            field_ty.field_getter_glue(quote!(field), quote!(field_as_repr), field_width);
-        let field_setter_glue =
-            field_ty.field_setter_glue(quote!(field), quote!(field_as_repr), field_width);
-        let new_glue = field_ty.field_setter_glue(
-            field_ident.to_token_stream(),
-            quote!(field_as_repr),
-            field_width,
-        );
+        if let Some(field_value) = field_value {
+            let new_glue = field_ty.field_setter_glue(
+                field_value,
+                quote!(field_as_repr),
+                field_width,
+            );
 
-        // This is a type used to represent this field in arguments and return types.
-        let field_ty = field_ty.as_rust_primitives();
-        if !field_ty.exists() {
-            fail!(field_span, "this field cannot be represented by any primitive integer type");
-        }
-
-        // This is the position of the least-significant bit of this field.
-        let field_offset = item_width;
-
-        item_width += field_width;
-        item_fns.push(quote! {
-            #field_vis fn #field_getter_ident(&self) -> #field_ty {
-                #fn_prelude
-
-                let mut field: #field_ty;
-                let mut field_as_repr = self.0 >> #field_offset;
-                #field_getter_glue
-
-                field
-            }
-
-            #field_vis fn #field_setter_ident(&mut self, field: #field_ty) {
-                #fn_prelude
-
+            item_new_stmts.push(quote! {
+                bits <<= #field_width;
                 let mut field_as_repr: ItemRepr = 0;
-                #field_setter_glue
+                #new_glue
+                bits |= field_as_repr;
+            });
+        } else {
+            let field_getter_glue =
+                field_ty.field_getter_glue(quote!(field), quote!(field_as_repr), field_width);
+            let field_setter_glue =
+                field_ty.field_setter_glue(quote!(field), quote!(field_as_repr), field_width);
+            let new_glue = field_ty.field_setter_glue(
+                field_ident.to_token_stream(),
+                quote!(field_as_repr),
+                field_width,
+            );
 
-                self.0 &= !((!0 >> (ITEM_REPR_WIDTH - #field_width)) << #field_offset);
-                self.0 |= field_as_repr << #field_offset;
+            // This is a type used to represent this field in arguments and return types.
+            let field_ty = field_ty.as_rust_primitives();
+            if !field_ty.exists() {
+                fail!(field_span, "this field cannot be represented by any primitive integer type");
             }
-        });
-        item_new_args.push(quote!(#field_ident: #field_ty));
-        item_new_stmts.push(quote! {
-            bits <<= #field_width;
-            let mut field_as_repr: ItemRepr = 0;
-            #new_glue
-            bits |= field_as_repr;
-        });
+
+            // This is the position of the least-significant bit of this field.
+            let field_offset = item_width;
+
+            item_width += field_width;
+            item_fns.push(quote! {
+                #field_vis fn #field_getter_ident(&self) -> #field_ty {
+                    #fn_prelude
+
+                    let mut field: #field_ty;
+                    let mut field_as_repr = self.0 >> #field_offset;
+                    #field_getter_glue
+
+                    field
+                }
+
+                #field_vis fn #field_setter_ident(&mut self, field: #field_ty) {
+                    #fn_prelude
+
+                    let mut field_as_repr: ItemRepr = 0;
+                    #field_setter_glue
+
+                    self.0 &= !((!0 >> (ITEM_REPR_WIDTH - #field_width)) << #field_offset);
+                    self.0 |= field_as_repr << #field_offset;
+                }
+            });
+            item_new_args.push(quote!(#field_ident: #field_ty));
+            item_new_stmts.push(quote! {
+                bits <<= #field_width;
+                let mut field_as_repr: ItemRepr = 0;
+                #new_glue
+                bits |= field_as_repr;
+            });
+        }
     }
     item_new_stmts.reverse();
 
@@ -205,6 +232,11 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
     .into()
+}
+
+#[derive(darling::FromMeta)]
+struct ConstantAttr {
+    value: Option<String>,
 }
 
 /// The type of a field.

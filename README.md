@@ -138,7 +138,7 @@ Regent respects the visibility of both structs and struct fields. Visibility of 
 Regent has basic support for tuple structs annotated with `bitwise`. This definition:
 
 ```rust
-#[bitwise]
+#[regent::bitwise]
 struct TupleStruct(u7, bool);
 ```
 
@@ -159,6 +159,26 @@ impl TupleStruct {
 // ...
 ```
 
+### Constant Fields
+
+Struct fields annotated with the `#[constant]` attribute are assigned a constant value in the `new` method. Getters and setters are not generated for these fields.
+
+By default, the value of a constant field is `Default::default()`. This behavior can be overridden by supplying a `value = "..."` argument to the attribute. For example:
+
+```rust
+#[regent::bitwise]
+struct Complex(
+    u8,
+    u16,
+    #[constant(value = "123456")]
+    u32,
+    #[constant]
+    bool,
+);
+```
+
+`Complex::new` initializes the `u32` field with `123_456u32` whereas the `bool` field is initialized with `false`.
+
 ### Restrictions
 
 Regent places some restrictions on how the `bitwise` macro may be used. These include:
@@ -167,7 +187,7 @@ Regent places some restrictions on how the `bitwise` macro may be used. These in
 - Generic parameters are not supported on structs, e.g., you cannot have:
 
     ```rust
-    #[bitwise]
+    #[regent::bitwise]
     struct A<T>([T; 5]);
     ```
 
