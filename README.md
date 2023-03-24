@@ -75,12 +75,11 @@ The first field in a struct annotated with `#[regent::bitwise]` is taken to be '
 
 ### Field Types
 
-The bit width of a field is inferred by the type, which can be `bool`, `char`, an arbitrary-width unsigned integer of the form `u`*width*, or a tuple or array of these types, *with the exception* of zero-sized types such as the 0-width integer `u0`, the unit `()`, and the 0-element array `[_; 0]`. Fields, as well as tuple and array elements, are tightly packed and are not aligned in any way.
+The bit width of a field is inferred by the type, which can be `bool`,  an arbitrary-width unsigned integer of the form `u`*width*, or a tuple or array of these types, *with the exception* of zero-sized types such as the 0-width integer `u0`, the unit `()`, and the 0-element array `[_; 0]`. Fields, as well as tuple and array elements, are tightly packed and are not aligned in any way.
 
 | Type           | Width (bits)                       |
 |----------------|------------------------------------|
 | `bool`         | 1                                  |
-| `char`         | 8                                  |
 | `u`*width*     | *width*                            |
 | `(A, ...)`     | sum of widths of constituent types |
 | `[T;` *len*`]` | product of *len* and width of `T`  |
