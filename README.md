@@ -44,9 +44,9 @@ impl Timestamp {
     fn month(&self) -> u8 {/* ... */}
     fn day(&self) -> u8 {/* ... */}
 
-    fn set_year(&mut self, value: u16) {/* ... */}
-    fn set_month(&mut self, value: u8) {/* ... */}
-    fn set_day(&mut self, value: u8) {/* ... */}
+    fn set_year(&mut self, field: u16) {/* ... */}
+    fn set_month(&mut self, field: u8) {/* ... */}
+    fn set_day(&mut self, field: u8) {/* ... */}
 }
 
 impl From<u32> for Timestamp {/* ... */}
@@ -75,7 +75,7 @@ The first field in a struct annotated with `#[regent::bitwise]` is taken to be '
 
 ### Field Types
 
-The bit width of a field is inferred by the type, which can be `bool`,  an arbitrary-width unsigned integer of the form `u`*width*, or a tuple or array of these types, *with the exception* of zero-sized types such as the 0-width integer `u0`, the unit `()`, and the 0-element array `[_; 0]`. Fields, as well as tuple and array elements, are tightly packed and are not aligned in any way.
+The bit width of a field is inferred by the type, which can be `bool`,  an arbitrary-width unsigned integer of the form `u`*width*, or a tuple or array of these types, *with the exception* of zero-sized types such as the 0-width integer `u0`, the unit `()`, and the 0-element array `[_; 0]`, which are explicitly disallowed. Fields, as well as tuple and array elements, are tightly packed and are not aligned in any way.
 
 | Type           | Width (bits)                       |
 |----------------|------------------------------------|
@@ -123,11 +123,60 @@ Similarly to how struct representations are 'rounded up' to the next-smallest un
 ```rust
 impl Timestamp {
     fn year(&self) -> u16 {/* ... */}
-    fn set_year(&mut self, value: u16) {/* ... */}
+    fn set_year(&mut self, field: u16) {/* ... */}
 }
 ```
 
-`Timestamp::year` zero-extends the `year` field, and `Timestamp::set_year` ignores the most-significant 5 bits of `value`.
+`Timestamp::year` zero-extends the `year` field, and `Timestamp::set_year` ignores the most-significant 5 bits of `field`.
+
+### Visibility
+
+Regent respects the visibility of both structs and struct fields. Visibility of the struct item propagates to the `new` method, and per-field visibility propagates to getter and setter methods.
+
+### Tuple Structs
+
+Regent has basic support for tuple structs annotated with `bitwise`. This definition:
+
+```rust
+#[bitwise]
+struct TupleStruct(u7, bool);
+```
+
+...roughly expands to:
+
+```rust
+#[repr(transparent)]
+struct TupleStruct(u8);
+
+impl TupleStruct {
+    fn _0(&self) -> u8 {/* .. */}
+    fn set_0(&mut self, field: u8) {/* ... */}
+
+    fn _1(&self) -> bool {/* ... */}
+    fn set_1(&mut self, field: bool) {/* ... */}
+}
+
+// ...
+```
+
+### Restrictions
+
+Regent places some restrictions on how the `bitwise` macro may be used. These include:
+
+- Zero-sized types are disallowed. A struct annotated with `bitwise` cannot be zero-sized, nor can the type of any single field within a struct be zero-sized.
+- Generic parameters are not supported on structs, e.g., you cannot have:
+
+    ```rust
+    #[bitwise]
+    struct A<T>([T; 5]);
+    ```
+
+  This may be made a feature in the future.
+- The length of an array (in the context of a struct field) must be an integer literal. Non-trivial constant expressions such as `8 * 4` are not supported for technical reasons.
+
+## Issues
+
+Bug reports, feature requests, and other enhancements are greatly appreciated. Kindly submit them to the GitHub repository.
 
 ## Acknowledgements
 

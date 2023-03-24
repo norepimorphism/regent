@@ -13,14 +13,10 @@ fn test_all_item_widths() {
             $(
                 {
                     #[bitwise]
-                    struct AsBoolArray {
-                        _0: [bool; $width],
-                    }
+                    struct AsBoolArray([bool; $width]);
 
                     #[bitwise]
-                    struct AsU1Array {
-                        _0: [u1; $width],
-                    }
+                    struct AsU1Array([u1; $width]);
 
                     assert_eq!(AsBoolArray::WIDTH, $width);
                     assert_eq!(AsU1Array::WIDTH, $width);

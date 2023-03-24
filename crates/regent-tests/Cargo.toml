@@ -6,7 +6,7 @@ version = "0.1.0"
 authors = ["norepimorphism <norepi@protonmail.com>"]
 edition = "2021"
 readme = false
-repository = "https://github.com/norepimorphism/noctane"
+repository = "https://github.com/norepimorphism/regent"
 license = "MPL-2.0"
 publish = false
 

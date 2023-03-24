@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Procedural macros for [*regent*].
+//! Procedural macros for [Regent].
 //!
-//! [regent]: https://crates.io/crates/regent
+//! [Regent]: https://crates.io/crates/regent
 
 use proc_macro::TokenStream;
 use quote::{
@@ -37,7 +37,11 @@ fn make_error(span: Span2, msg: &'static str) -> TokenStream {
     syn::Error::new(span, msg).into_compile_error().into()
 }
 
-/// The whole point.
+/// Does the thing.
+///
+/// See the [README] for usage information.
+///
+/// [README]: https://crates.io/crates/regent
 #[proc_macro_attribute]
 pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let syn::ItemStruct {
@@ -79,15 +83,17 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut item_new_stmts = Vec::new();
 
     // Process fields.
-    for field in item_fields {
+    for (i, field) in item_fields.into_iter().enumerate() {
         let syn::Field {
             attrs: field_attrs, ident: field_ident, ty: field_ty, vis: field_vis, ..
         } = field;
 
-        let Some(field_ident) = field_ident else {
-            fail!(item_span, "tuple structs are not supported");
+        let (field_getter_ident, field_setter_ident) = match field_ident {
+            Some(it) => (it.clone(), format_ident!("set_{it}")),
+            None => (format_ident!("_{i}", span = item_span), format_ident!("set_{i}", span = item_span)),
         };
-        let field_span = field_ident.span();
+        let field_ident = &field_getter_ident;
+        let field_span = field_getter_ident.span();
 
         if !field_attrs.is_empty() {
             fail!(field_span, "attributes are not (yet) supported on struct fields");
@@ -124,8 +130,6 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // This is the position of the least-significant bit of this field.
         let field_offset = item_width;
-        let field_getter_ident = quote!(#field_ident);
-        let field_setter_ident = format_ident!("set_{field_ident}");
 
         item_width += field_width;
         item_fns.push(quote! {
@@ -142,7 +146,7 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #field_vis fn #field_setter_ident(&mut self, field: #field_ty) {
                 #fn_prelude
 
-                let mut field_as_repr: ItemRepr;
+                let mut field_as_repr: ItemRepr = 0;
                 #field_setter_glue
 
                 self.0 &= !((!0 >> (ITEM_REPR_WIDTH - #field_width)) << #field_offset);
@@ -152,7 +156,7 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
         item_new_args.push(quote!(#field_ident: #field_ty));
         item_new_stmts.push(quote! {
             bits <<= #field_width;
-            let mut field_as_repr: ItemRepr;
+            let mut field_as_repr: ItemRepr = 0;
             #new_glue
             bits |= field_as_repr;
         });
@@ -493,8 +497,7 @@ impl UIntType {
         let width = if self.width <= 8 {
             8
         } else {
-            // This is the 'magnitude' of `width`, or the integer component of
-            // `log2(width)`.
+            // This is the 'magnitude' of `width`, or the integer component of `log2(width)`.
             let mag = self.width.ilog2() as usize;
             // This is the fractional component of `log2(width)`.
             let frac = self.width & ((1 << mag) - 1);

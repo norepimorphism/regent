@@ -6,8 +6,11 @@ version = "0.1.0"
 authors = ["norepimorphism <norepi@protonmail.com>"]
 edition = "2021"
 description = "Bitfields in Rust"
-repository = "https://github.com/norepimorphism/noctane"
+readme.workspace = true
+repository = "https://github.com/norepimorphism/regent"
 license = "MPL-2.0"
+keywords = ["bitfield"]
+categories = ["data-structures", "encoding"]
 
 [dependencies]
 regent-internals = { path = "../regent-internals" }

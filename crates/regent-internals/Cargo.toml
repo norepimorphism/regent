@@ -7,7 +7,7 @@ authors = ["norepimorphism <norepi@protonmail.com>"]
 edition = "2021"
 description = "Internal proc macros for the regent crate"
 readme = false
-repository = "https://github.com/norepimorphism/noctane"
+repository = "https://github.com/norepimorphism/regent"
 license = "MPL-2.0"
 
 [lib]
