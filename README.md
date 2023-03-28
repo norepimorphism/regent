@@ -35,7 +35,7 @@ struct Timestamp {
 #[repr(transparent)]
 struct Timestamp(u32);
 
-// (Function and trait implementations are omitted for brevity.)
+// (Function bodies are omitted for brevity.)
 
 impl Timestamp {
     fn new(year: u16, month: u8, day: u8) -> Self {/* ... */}
@@ -49,29 +49,32 @@ impl Timestamp {
     fn set_day(&mut self, field: u8) {/* ... */}
 }
 
-impl From<u32> for Timestamp {/* ... */}
-impl From<Timestamp> for u32 {/* ... */}
+impl regent::Bitwise for Timestamp {
+    const WIDTH: usize = 18;
+    type Repr = u32;
+
+    fn from_repr(repr: Self::Repr) -> Self {/* ... */}
+    fn from_repr_checked(repr: Self::Repr) -> Option<Self> {/* ... */}
+    fn to_repr(&self) -> Self::Repr {/* ... */}
+}
 ```
 
 To serialize a `Timestamp` into a `u32`, you might write:
 
 ```rust
-let se = u32::from(Timestamp::new(year, month, day));
+use regent::Bitwise as _;
+
+let se = Timestamp::new(year, month, day).to_repr();
 ```
 
 To deserialize a `Timestamp` from a `u32`, you might write:
 
 ```rust
-
-let de = Timestamp::from(se);
-let year = de.year();
-let month = de.month();
-let day = de.day();
+let de = Timestamp::from_repr(se);
+let (year, month, day) = (de.year(), de.month(), de.day());
 ```
 
 ## Design
-
-The first field in a struct annotated with `#[regent::bitwise]` is taken to be 'least-significant', and the last field is 'most-significant'.
 
 ### Field Types
 
@@ -113,6 +116,8 @@ Internally, `Timestamp` is represented in binary as:
 00000000000000 ddddd mmmm yyyyyyyyy
 ^ bit 31         ^ bit 15         ^ bit 0
 ```
+
+The first field is taken to be 'least-significant', and the last field is 'most-significant'.
 
 ### Field Access
 

@@ -10,7 +10,7 @@ use quote::{
     __private::{Span as Span2, TokenStream as TokenStream2},
     format_ident,
     quote,
-    ToTokens as _,
+    ToTokens,
 };
 
 /// Like [`try`](core::try) except the return type of the containing function is `T` instead of
@@ -33,43 +33,252 @@ macro_rules! fail {
     }};
 }
 
-/// Creates a [`TokenStream`] representing a compilation error with the given message.
+/// Creates a [`TokenStream`] that raises a compilation error with the given message.
 fn make_error(span: Span2, msg: &'static str) -> TokenStream {
     syn::Error::new(span, msg).into_compile_error().into()
+}
+
+/// Generates a Rust snippet to bring associated items from `Bitwise` and `BitwiseExt` into scope.
+fn make_fn_prelude(item_ident: &syn::Ident) -> TokenStream2 {
+    quote! {
+        #[allow(unused)]
+        const ITEM_WIDTH: usize = <#item_ident as ::regent::Bitwise>::WIDTH;
+        #[allow(unused)]
+        const ITEM_REPR_WIDTH: usize = <#item_ident as ::regent::BitwiseExt>::REPR_WIDTH;
+        #[allow(unsued)]
+        type ItemRepr = <#item_ident as ::regent::Bitwise>::Repr;
+    }
+}
+
+/// Calls [`fail`] if `$item_generics` is non-empty.
+macro_rules! assert_no_generics {
+    ($item_span:expr, $item_generics:expr $(,)?) => {
+        if !$item_generics.params.is_empty() {
+            fail!($item_span, "generic parameters are not supported in this context");
+        }
+    };
+}
+
+/// Calls [`fail`] if `$expected_width` disagrees with `$item_width`.
+macro_rules! assert_expected_width_is_correct {
+    ($expected_width:expr, $item_span:expr, $item_width:expr, $item_prelude:expr $(,)?) => {
+        if let Some(expected_width) = $expected_width {
+            match &$item_width {
+                Width::Lit(actual_width) => {
+                    if expected_width != *actual_width {
+                        fail!($item_span, "expected width of item does not match actual width");
+                    }
+                }
+                Width::Expr(actual_width) => {
+                    // We don't have enough information to evaluate `actual_width` at macro
+                    // evaluation time, but we can generate Rust code to do so at compile-time.
+
+                    $item_prelude.extend(quote! {
+                        const _: () = if #expected_width != (#actual_width) {
+                            ::core::panicking::panic("expected width of item does not match actual width");
+                        };
+                    });
+                }
+            }
+        }
+    };
+}
+
+/// The bit-width of a type recognized by [`bitwise`].
+#[derive(Clone)]
+enum Width {
+    /// The width is a [`usize`] known at macro evaluation time.
+    Lit(usize),
+    /// The width is an expression that evaluates to a [`usize`] and is represented here by a
+    /// [token stream](TokenStream2).
+    Expr(TokenStream2),
+}
+
+impl Width {
+    /// A shorthand for `Width::Lit(0)`.
+    fn zero() -> Self {
+        Self::Lit(0)
+    }
+}
+
+// I no longer remember if we use this anymore, but it can't hurt to have (right?).
+impl std::ops::Add for Width {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Self::Lit(lhs), Self::Lit(rhs)) => Self::Lit(lhs + rhs),
+            (lhs, rhs) => Self::Expr(quote!(#lhs + #rhs)),
+        }
+    }
+}
+
+impl std::ops::AddAssign<&Self> for Width {
+    fn add_assign(&mut self, rhs: &Self) {
+        // This seems a little silly, but we need to re-borrow `self` here.
+        match (&mut *self, rhs) {
+            (Self::Lit(inner), Self::Lit(rhs)) => {
+                *inner += rhs;
+            }
+            (Self::Lit(inner), Self::Expr(rhs)) => {
+                *self = Self::Expr(quote!(#inner + #rhs));
+            }
+            (Self::Expr(inner), rhs) => {
+                inner.extend(quote!(+ #rhs));
+            }
+        }
+    }
+}
+
+impl std::iter::Sum for Width {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        let mut acc = Self::zero();
+        for elem in iter {
+            acc += &elem;
+        }
+
+        acc
+    }
+}
+
+impl std::ops::Mul for Width {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        match (self, rhs) {
+            (Self::Lit(lhs), Self::Lit(rhs)) => Self::Lit(lhs * rhs),
+            (lhs, rhs) => Self::Expr(quote!(#lhs * #rhs)),
+        }
+    }
+}
+
+impl quote::ToTokens for Width {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        match self {
+            Self::Lit(width) => {
+                quote!(#width).to_tokens(tokens);
+            }
+            Self::Expr(width) => {
+                width.to_tokens(tokens);
+            }
+        }
+    }
+}
+
+fn determine_item_repr(
+    expected_width: Option<usize>,
+    item_span: Span2,
+    item_attrs: &mut Vec<syn::Attribute>,
+    item_calc_width: &Width,
+) -> Result<UIntType, TokenStream> {
+    let repr = if let Some((i, attr)) =
+        item_attrs.iter_mut().enumerate().find(|(_, attr)| attr.path.is_ident("repr"))
+    {
+        // FIXME: don't unwrap.
+        let arg = attr.parse_args::<syn::Ident>().unwrap().to_string();
+        let Some(result) = UIntType::parse(item_span, &arg) else {
+            return Err(make_error(item_span, "'bitwise' items can only be represented by unsigned integer primitives"));
+        };
+        item_attrs.remove(i);
+
+        result?
+    } else if let Some(width) = expected_width {
+        UIntType { width }.round_up()
+    } else {
+        match item_calc_width {
+            Width::Lit(width) => UIntType { width: *width }.round_up(),
+            Width::Expr(_) => {
+                return Err(make_error(
+                    item_span,
+                    "not enough information to compute item width at macro evaluation time",
+                ));
+            }
+        }
+    };
+
+    if repr.exists() {
+        Ok(repr)
+    } else {
+        Err(make_error(item_span, "item cannot be represented by any existing unsigned integer primitive"))
+    }
 }
 
 /// Does the thing.
 ///
 /// See the [README] for usage information.
 ///
-/// [README]: https://crates.io/crates/regent
+/// [README]: https://github.com/norepimorphism/regent/blob/main/README.md
 #[proc_macro_attribute]
-pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let syn::ItemStruct {
+pub fn bitwise(attr: TokenStream, item: TokenStream) -> TokenStream {
+    #[derive(darling::FromMeta)]
+    struct ItemArgs {
+        size: Option<usize>,
+        width: Option<usize>,
+    }
+
+    let item_args = syn::parse_macro_input!(attr as syn::AttributeArgs);
+    // FIXME: don't unwrap.
+    let item_args = ItemArgs::from_list(&item_args).unwrap();
+    if item_args.size.is_some() && item_args.width.is_some() {
+        fail!(Span2::call_site(), "'size' and 'width' are mutually exclusive arguments to the 'bitwise' macro");
+    }
+    let expected_width = item_args.width.or_else(|| item_args.size.map(|it| it * 8));
+
+    match syn::parse_macro_input!(item as syn::Item) {
+        syn::Item::Enum(item) => bitwise_on_enum(expected_width, item),
+        syn::Item::Struct(item) => bitwise_on_struct(expected_width, item),
+        _ => make_error(
+            Span2::call_site(),
+            "'bitwise' can only be applied to structs and enums",
+        ),
+    }
+}
+
+/// [`bitwise`] for enums.
+fn bitwise_on_enum(_expected_width: Option<usize>, item: syn::ItemEnum) -> TokenStream {
+    let syn::ItemEnum {
         attrs: item_attrs,
+        generics: item_generics,
+        ident: item_ident,
+        enum_token: item_enum,
+        vis: item_vis,
+        ..
+    } = item;
+
+    // This is a 'fallback span' for when a more precise span is unavailable.
+    let item_span = item_enum.span;
+
+    assert_no_generics!(item_span, item_generics);
+
+    quote! {
+        #(#item_attrs)*
+        #item_vis enum #item_ident {}
+    }
+    .into()
+}
+
+/// [`bitwise`] for structs.
+fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> TokenStream {
+    let syn::ItemStruct {
+        attrs: mut item_attrs,
         fields: item_fields,
         generics: item_generics,
         ident: item_ident,
         struct_token: item_struct,
         vis: item_vis,
         ..
-    } = syn::parse_macro_input!(item as _);
+    } = item;
+
+    let mut item_prelude = TokenStream2::new();
+    let fn_prelude = make_fn_prelude(&item_ident);
+
     // This is a 'fallback span' for when a more precise span is unavailable.
     let item_span = item_struct.span;
 
-    if !item_generics.params.is_empty() {
-        fail!(item_span, "generic parameters are not supported");
-    }
+    assert_no_generics!(item_span, item_generics);
 
-    // This snippet is prepended to the body of all functions we generate that rely on
-    // `Bitwise::REPR_WIDTH` and `Bitwise::Repr`.
-    let fn_prelude = quote! {
-        const ITEM_REPR_WIDTH: usize = <#item_ident as ::regent::Bitwise>::REPR_WIDTH;
-        type ItemRepr = <#item_ident as ::regent::Bitwise>::Repr;
-    };
-
-    // This is the total bit width of all fields.
-    let mut item_width: usize = 0;
+    // This is the total bit-width of all fields.
+    let mut item_width = Width::zero();
     // This is a list of methods (or pairs of methods) we generate for `#item_ident`.
     //
     // Specifically, each element is a pair of getter and setter methods for a particular field of
@@ -91,49 +300,55 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         let (field_getter_ident, field_setter_ident) = match field_ident {
             Some(it) => (it.clone(), format_ident!("set_{it}")),
-            None => (format_ident!("_{i}", span = item_span), format_ident!("set_{i}", span = item_span)),
+            None => (
+                format_ident!("_{i}", span = item_span),
+                format_ident!("set_{i}", span = item_span),
+            ),
         };
         let field_ident = &field_getter_ident;
         let field_span = field_getter_ident.span();
 
-        let field_ty = unwrap!(Type::parse(field_span, &field_ty));
-        match field_ty {
-            Type::Tuple(ref tys) => if tys.is_empty() {
-                fail!(field_span, "struct fields cannot be the unit type")
-            },
-            Type::Array { len, .. } => if len == 0 {
-                fail!(field_span, "struct fields cannot be zero-sized arrays")
-            },
-            _ => {}
-        }
+        let field_ty = unwrap!(Type::parse(field_span, field_ty));
+        unwrap!(field_ty.validate(field_span));
 
+        // This is the position of the least-significant bit of this field.
+        let field_offset = item_width.clone();
+        // This is the exact width of this field.
         let field_width = field_ty.width();
+        item_width += &field_width;
 
         let mut field_value = None;
         for attr in field_attrs {
+            // FIXME: don't unwrap.
             let metas = darling::util::parse_attribute_to_meta_list(&attr).unwrap();
             if metas.path.is_ident("constant") {
+                #[derive(darling::FromMeta)]
+                struct ConstantArgs {
+                    value: Option<syn::Expr>,
+                }
+
                 let nested_metas: Vec<_> = metas.nested.into_iter().collect();
-                let attr = ConstantAttr::from_list(&nested_metas).unwrap();
-                field_value = Some(match attr.value {
-                    Some(it) => syn::parse_str::<syn::Expr>(&it).unwrap().into_token_stream(),
+                // FIXME: don't unwrap.
+                let args = ConstantArgs::from_list(&nested_metas).unwrap();
+                field_value = Some(match args.value {
+                    Some(it) => it.into_token_stream(),
                     None => {
-                        let field_ty = field_ty.as_rust_primitives();
+                        let field_ty = field_ty.clone().as_rust_primitives();
 
                         quote! { (<#field_ty as ::core::default::Default>::default()) }
                     }
                 });
             } else {
-                fail!(field_span, "encountered unexpected field attribute")
+                fail!(field_span, "invalid attribute")
             }
         }
 
         if let Some(field_value) = field_value {
-            let new_glue = field_ty.field_setter_glue(
-                field_value,
-                quote!(field_as_repr),
-                field_width,
-            );
+            // This is the simple case for constant fields only. We don't need to generate getters
+            // or setters.
+
+            let new_glue =
+                field_ty.field_setter_glue(field_value, quote!(field_as_repr), &field_width);
 
             item_new_stmts.push(quote! {
                 bits <<= #field_width;
@@ -142,26 +357,27 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 bits |= field_as_repr;
             });
         } else {
+            // This is the more complicated case for non-constant fields.
+
             let field_getter_glue =
-                field_ty.field_getter_glue(quote!(field), quote!(field_as_repr), field_width);
+                field_ty.field_getter_glue(quote!(field), quote!(field_as_repr), &field_width);
             let field_setter_glue =
-                field_ty.field_setter_glue(quote!(field), quote!(field_as_repr), field_width);
+                field_ty.field_setter_glue(quote!(field), quote!(field_as_repr), &field_width);
             let new_glue = field_ty.field_setter_glue(
                 field_ident.to_token_stream(),
                 quote!(field_as_repr),
-                field_width,
+                &field_width,
             );
 
             // This is a type used to represent this field in arguments and return types.
             let field_ty = field_ty.as_rust_primitives();
             if !field_ty.exists() {
-                fail!(field_span, "this field cannot be represented by any primitive integer type");
+                fail!(
+                    field_span,
+                    "'bitwise' field cannot be represented in terms of primitive Rust types"
+                );
             }
 
-            // This is the position of the least-significant bit of this field.
-            let field_offset = item_width;
-
-            item_width += field_width;
             item_fns.push(quote! {
                 #field_vis fn #field_getter_ident(&self) -> #field_ty {
                     #fn_prelude
@@ -192,14 +408,15 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
             });
         }
     }
+    assert_expected_width_is_correct!(expected_width, item_span, item_width, item_prelude);
+    let item_repr =
+        unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
+
     item_new_stmts.reverse();
 
-    let item_repr = UIntType { width: item_width }.round_up();
-    if !item_repr.exists() {
-        fail!(item_span, "this struct cannot be represented by any primitive integer type");
-    }
-
     quote! {
+        #item_prelude
+
         #(#item_attrs)*
         #[repr(transparent)]
         #item_vis struct #item_ident(#item_repr);
@@ -221,29 +438,25 @@ pub fn bitwise(_attr: TokenStream, item: TokenStream) -> TokenStream {
             const WIDTH: usize = #item_width;
 
             type Repr = #item_repr;
-        }
 
-        impl From<#item_repr> for #item_ident {
-            fn from(repr: #item_repr) -> #item_ident {
-                #item_ident(repr)
+            fn from_repr(repr: Self::Repr) -> Self {
+                Self(repr)
             }
-        }
 
-        impl From<#item_ident> for #item_repr {
-            fn from(it: #item_ident) -> #item_repr {
-                it.0
+            fn from_repr_checked(repr: Self::Repr) -> Option<Self> {
+                todo!()
+            }
+
+            fn to_repr(&self) -> Self::Repr {
+                self.0
             }
         }
     }
     .into()
 }
 
-#[derive(darling::FromMeta)]
-struct ConstantAttr {
-    value: Option<String>,
-}
-
-/// The type of a field.
+/// The type of an enum variant or struct field.
+#[derive(Clone)]
 enum Type {
     /// A [prime type](PrimeType).
     Prime(PrimeType),
@@ -259,12 +472,12 @@ enum Type {
 }
 
 impl Type {
-    fn parse(span: Span2, ty: &syn::Type) -> Result<Self, TokenStream> {
+    fn parse(span: Span2, ty: syn::Type) -> Result<Self, TokenStream> {
         match ty {
             syn::Type::Path(ty) => PrimeType::parse(span, ty).map(Self::Prime),
             syn::Type::Tuple(syn::TypeTuple { elems: tys, .. }) => {
                 let tys = tys
-                    .iter()
+                    .into_iter()
                     .map(|ty| {
                         if let syn::Type::Path(ty) = ty {
                             PrimeType::parse(span, ty)
@@ -277,7 +490,7 @@ impl Type {
                 Ok(Self::Tuple(tys))
             }
             syn::Type::Array(syn::TypeArray { elem: ty, len, .. }) => {
-                let syn::Type::Path(ref ty) = **ty else {
+                let syn::Type::Path(ty) = *ty else {
                     return Err(make_error(span, "array element type must be a path"));
                 };
                 let ty = PrimeType::parse(span, ty)?;
@@ -289,15 +502,17 @@ impl Type {
 
                 Ok(Self::Array { ty, len })
             }
-            _ => Err(make_error(span, "the type of this field is not supported")),
+            _ => Err(make_error(span, "unsupported type")),
         }
     }
 
-    fn as_rust_primitives(&self) -> Self {
+    fn as_rust_primitives(self) -> Self {
         match self {
             Self::Prime(ty) => Self::Prime(ty.as_rust_primitive()),
-            Self::Tuple(tys) => Self::Tuple(tys.iter().map(|it| it.as_rust_primitive()).collect()),
-            Self::Array { ty, len } => Self::Array { ty: ty.as_rust_primitive(), len: *len },
+            Self::Tuple(tys) => {
+                Self::Tuple(tys.into_iter().map(|it| it.as_rust_primitive()).collect())
+            }
+            Self::Array { ty, len } => Self::Array { ty: ty.as_rust_primitive(), len },
         }
     }
 
@@ -309,19 +524,37 @@ impl Type {
         }
     }
 
-    fn width(&self) -> usize {
+    fn width(&self) -> Width {
         match self {
             Self::Prime(ty) => ty.width(),
             Self::Tuple(tys) => tys.iter().map(|ty| ty.width()).sum(),
-            Self::Array { ty, len } => ty.width() * len,
+            Self::Array { ty, len } => ty.width() * Width::Lit(*len),
         }
+    }
+
+    fn validate(&self, span: Span2) -> Result<(), TokenStream> {
+        match self {
+            Type::Tuple(tys) => {
+                if tys.is_empty() {
+                    return Err(make_error(span, "'bitwise' fields cannot be the unit type"));
+                }
+            }
+            Type::Array { len, .. } => {
+                if *len == 0 {
+                    return Err(make_error(span, "'bitwise' fields cannot be zero-sized arrays"));
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
     }
 
     fn field_getter_glue(
         &self,
         field: TokenStream2,
         field_as_repr: TokenStream2,
-        field_width: usize,
+        field_width: &Width,
     ) -> TokenStream2 {
         match self {
             Self::Prime(ty) => ty.field_getter_glue(field, field_as_repr, field_width),
@@ -330,7 +563,7 @@ impl Type {
                 for ty in tys.iter().rev() {
                     let elem_width = ty.width();
                     let elem_getter_glue =
-                        ty.field_getter_glue(quote!(elem), field_as_repr.clone(), elem_width);
+                        ty.field_getter_glue(quote!(elem), field_as_repr.clone(), &elem_width);
                     tmp_elems.push(quote!({
                         let elem;
                         #elem_getter_glue
@@ -355,7 +588,8 @@ impl Type {
             }
             Self::Array { ty, len } => {
                 let elem_width = ty.width();
-                let elem_getter_glue = ty.field_getter_glue(quote!(elem), field_as_repr.clone(), elem_width);
+                let elem_getter_glue =
+                    ty.field_getter_glue(quote!(elem), field_as_repr.clone(), &elem_width);
 
                 let mut elems = Vec::new();
                 for _ in 0..(*len) {
@@ -380,7 +614,7 @@ impl Type {
         &self,
         field: TokenStream2,
         field_as_repr: TokenStream2,
-        field_width: usize,
+        field_width: &Width,
     ) -> TokenStream2 {
         match self {
             Self::Prime(ty) => ty.field_setter_glue(field, field_as_repr, field_width),
@@ -390,7 +624,7 @@ impl Type {
                     let i = syn::Index::from(i);
                     let elem_width = ty.width();
                     let elem_getter_glue =
-                        ty.field_setter_glue(quote!(#field.#i), field_as_repr.clone(), elem_width);
+                        ty.field_setter_glue(quote!(#field.#i), field_as_repr.clone(), &elem_width);
                     result.extend(quote! {
                         #elem_getter_glue
                         #field_as_repr <<= #elem_width;
@@ -402,7 +636,7 @@ impl Type {
             Self::Array { ty, len } => {
                 let elem_width = ty.width();
                 let elem_getter_glue =
-                    ty.field_setter_glue(quote!(#field[i]), field_as_repr.clone(), elem_width);
+                    ty.field_setter_glue(quote!(#field[i]), field_as_repr.clone(), &elem_width);
 
                 quote! {
                     field_as_repr = 0;
@@ -432,80 +666,92 @@ impl quote::ToTokens for Type {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum PrimeType {
     Bool,
     UInt(UIntType),
+    Other(syn::TypePath),
 }
 
 impl PrimeType {
-    fn parse(span: Span2, ty: &syn::TypePath) -> Result<Self, TokenStream> {
+    fn parse(span: Span2, ty: syn::TypePath) -> Result<Self, TokenStream> {
         if let Some(ty) = ty.path.get_ident().map(ToString::to_string) {
             if ty == "bool" {
                 return Ok(Self::Bool);
-            } else if let Some(("", width)) = ty.split_once("u") {
-                return UIntType::parse(span, width).map(Self::UInt);
+            } else if let Some(result) = UIntType::parse(span, &ty) {
+                return result.map(Self::UInt);
             }
         }
 
-        Err(make_error(span, "the type of this field is not supported"))
+        Ok(Self::Other(ty))
     }
 
     fn as_rust_primitive(self) -> Self {
-        match self {
-            Self::UInt(ty) => Self::UInt(ty.round_up()),
-            other => other,
+        if let Self::UInt(ty) = self {
+            Self::UInt(ty.round_up())
+        } else {
+            self
         }
     }
 
-    fn exists(self) -> bool {
+    fn exists(&self) -> bool {
         match self {
             Self::UInt(ty) => ty.exists(),
             _ => true,
         }
     }
 
-    fn width(self) -> usize {
+    fn width(&self) -> Width {
         match self {
-            Self::Bool => 1,
-            Self::UInt(ty) => ty.width,
+            Self::Bool => Width::Lit(1),
+            Self::UInt(ty) => Width::Lit(ty.width),
+            Self::Other(ty) => Width::Expr(quote!(<#ty as ::regent::Bitwise>::WIDTH)),
         }
     }
 
     fn field_getter_glue(
-        self,
+        &self,
         field: TokenStream2,
         field_as_repr: TokenStream2,
-        field_width: usize,
+        field_width: &Width,
     ) -> TokenStream2 {
-        let inner = quote! { #field_as_repr & (!0 >> (ITEM_REPR_WIDTH - #field_width)) };
+        let inner = quote! { (#field_as_repr & (!0 >> (ITEM_REPR_WIDTH - #field_width))) };
         let expr = match self {
-            Self::Bool => quote! { (#inner) == 1 },
-            Self::UInt(_) => quote! { (#inner) as _ },
+            Self::Bool => quote! { #inner == 1 },
+            Self::UInt(_) => quote! { #inner as _ },
+            Self::Other(_) => quote! { #inner.into() },
         };
 
         quote! { #field = #expr; }
     }
 
     fn field_setter_glue(
-        self,
+        &self,
         field: TokenStream2,
         field_as_repr: TokenStream2,
-        field_width: usize,
+        field_width: &Width,
     ) -> TokenStream2 {
+        let expr = match self {
+            Self::Other(_) => quote! { <ItemRepr as ::core::convert::From>::from(#field) },
+            _ => quote! { #field as ItemRepr },
+        };
+
         quote! {
-            #field_as_repr |= (#field as ItemRepr) & (!0 >> (ITEM_REPR_WIDTH - #field_width));
+            #field_as_repr |= (#expr) & (!0 >> (ITEM_REPR_WIDTH - #field_width));
         }
     }
 }
 
 impl quote::ToTokens for PrimeType {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        match *self {
+        match self {
             Self::Bool => {
                 tokens.extend(quote!(bool));
             }
             Self::UInt(ty) => {
+                ty.to_tokens(tokens);
+            }
+            Self::Other(ty) => {
                 ty.to_tokens(tokens);
             }
         }
@@ -518,15 +764,18 @@ struct UIntType {
 }
 
 impl UIntType {
-    fn parse(span: Span2, width: &str) -> Result<Self, TokenStream> {
-        let width = width.parse().map_err(|_| {
-            make_error(span, "the type of this field has an invalid integer suffix")
-        })?;
+    fn parse(span: Span2, ty: &str) -> Option<Result<Self, TokenStream>> {
+        let Some(("", width)) = ty.split_once('u') else {
+            return None;
+        };
+        let Ok(width) = width.parse() else {
+            return Some(Err(make_error(span, "failed to parse integer width suffix")));
+        };
         if width == 0 {
-            return Err(make_error(span, "this field is zero-sized, which is not supported"))?;
+            return Some(Err(make_error(span, "'bitwise' does not support zero-sized types")));
         }
 
-        Ok(Self { width })
+        Some(Ok(Self { width }))
     }
 
     fn round_up(self) -> Self {
