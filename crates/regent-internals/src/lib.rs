@@ -542,7 +542,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 match self {
                     Self::Bool => quote! { (#inner) == 1 },
                     Self::UInt(_) => quote! { (#inner) as _ },
-                    Self::Other(_) => quote! { ::regent::Bitwise::from_repr(#inner) },
+                    Self::Other(_) => quote!(unsafe { ::regent::Bitwise::from_repr_unchecked(#inner) }),
                 }
             }
 
