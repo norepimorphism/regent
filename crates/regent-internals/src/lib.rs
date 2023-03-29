@@ -197,7 +197,7 @@ struct Item {
     ident: syn::Ident,
     body: TokenStream2,
     methods: Vec<Method>,
-    bitwise_impl: TokenStream2,
+    bitwise_impl: BitwiseImpl,
 }
 
 impl ToTokens for Item {
@@ -230,7 +230,11 @@ impl ToTokens for Item {
                 }
             })
             .collect();
-        let bitwise_impl = &self.bitwise_impl;
+        let bitwise_width = &self.bitwise_impl.width;
+        let bitwise_repr = &self.bitwise_impl.repr;
+        let bitwise_from_repr = &self.bitwise_impl.from_repr;
+        let bitwise_from_repr_checked = &self.bitwise_impl.from_repr_checked;
+        let bitwise_to_repr = &self.bitwise_impl.to_repr;
 
         let impl_trait_token =
             if cfg!(feature = "nightly") { quote!(impl const) } else { quote!(impl) };
@@ -244,7 +248,24 @@ impl ToTokens for Item {
             }
 
             #impl_trait_token ::regent::Bitwise for #ident {
-                #bitwise_impl
+                const WIDTH: usize = #bitwise_width;
+
+                type Repr = #bitwise_repr;
+
+                fn from_repr(repr: Self::Repr) -> Self {
+                    #method_prelude
+                    #bitwise_from_repr
+                }
+
+                fn from_repr_checked(repr: Self::Repr) -> Option<Self> {
+                    #method_prelude
+                    #bitwise_from_repr_checked
+                }
+
+                fn to_repr(&self) -> Self::Repr {
+                    #method_prelude
+                    #bitwise_to_repr
+                }
             }
         })
     }
@@ -253,6 +274,14 @@ impl ToTokens for Item {
 struct Method {
     sig: TokenStream2,
     body: TokenStream2,
+}
+
+struct BitwiseImpl {
+    width: Width,
+    repr: UIntType,
+    from_repr: TokenStream2,
+    from_repr_checked: TokenStream2,
+    to_repr: TokenStream2,
 }
 
 /// Does the thing.
@@ -337,7 +366,8 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
     let mut item_new_args = Vec::new();
     // This is a list of statements (or series of statements) that process the arguments of
     // `#item_ident::new`.
-    let mut item_new_stmts = Vec::new();
+    let mut new_stmts = Vec::new();
+    let mut from_repr_checked_body = TokenStream2::new();
 
     // Process fields.
     for (i, field) in item_fields.into_iter().enumerate() {
@@ -445,11 +475,11 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 field_as_repr: TokenStream2,
                 field_width: &Width,
             ) -> TokenStream2 {
-                let inner = quote! { (#field_as_repr & (!0 >> (ITEM_REPR_WIDTH - #field_width))) };
+                let inner = quote!(#field_as_repr & (!0 >> (ITEM_REPR_WIDTH - (#field_width))));
 
                 match self {
-                    Self::Bool => quote! { #inner == 1 },
-                    Self::UInt(_) => quote! { #inner as _ },
+                    Self::Bool => quote! { (#inner) == 1 },
+                    Self::UInt(_) => quote! { (#inner) as _ },
                     Self::Other(_) => quote! { ::regent::Bitwise::from_repr(#inner) },
                 }
             }
@@ -464,7 +494,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                     _ => quote! { (#field as ItemRepr) },
                 };
 
-                quote! { #expr & (!0 >> (ITEM_REPR_WIDTH - #field_width)) }
+                quote! { #expr & (!0 >> (ITEM_REPR_WIDTH - (#field_width))) }
             }
         }
 
@@ -491,6 +521,15 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
         let field_width = field_ty.width();
         item_width += &field_width;
 
+        // This is a type used to represent this field in arguments and return types.
+        let field_ty = field_ty.as_rust_primitives();
+        if !field_ty.exists() {
+            fail!(
+                field_span,
+                "'bitwise' field cannot be represented in terms of primitive Rust types"
+            );
+        }
+
         let mut field_value = None;
         for attr in field_attrs {
             // FIXME: don't unwrap.
@@ -506,11 +545,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 let args = ConstantArgs::from_list(&nested_metas).unwrap();
                 field_value = Some(match args.value {
                     Some(it) => it.into_token_stream(),
-                    None => {
-                        let field_ty = field_ty.clone().as_rust_primitives();
-
-                        quote! { (<#field_ty as ::core::default::Default>::default()) }
-                    }
+                    None => quote!(<#field_ty as ::core::default::Default>::default()),
                 });
             } else {
                 fail!(field_span, "invalid attribute")
@@ -522,6 +557,15 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
             // This is the simple case for constant fields only. We don't need to generate getters
             // or setters.
 
+            let field_decoded = field_ty.decode(quote!(repr), &field_width);
+            from_repr_checked_body.extend(quote!({
+                let repr: ItemRepr = repr >> (#field_offset);
+                let actual_value: #field_ty = #field_decoded;
+                let expected_value: #field_ty = #field_value;
+                if actual_value != expected_value {
+                    return None;
+                }
+            }));
             new_glue = field_ty.encode(field_value, &field_width);
         } else {
             // This is the more complicated case for non-constant fields.
@@ -535,19 +579,10 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 &field_width,
             );
 
-            // This is a type used to represent this field in arguments and return types.
-            let field_ty = field_ty.as_rust_primitives();
-            if !field_ty.exists() {
-                fail!(
-                    field_span,
-                    "'bitwise' field cannot be represented in terms of primitive Rust types"
-                );
-            }
-
             item_methods.push(Method {
                 sig: quote!(#field_vis fn #field_getter_ident(&self) -> #field_ty),
                 body: quote! {
-                    let mut field_as_repr = self.0 >> #field_offset;
+                    let mut field_as_repr: ItemRepr = self.0 >> (#field_offset);
 
                     #field_decoded
                 },
@@ -556,13 +591,13 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 sig: quote!(#field_vis fn #field_setter_ident(&mut self, field: #field_ty)),
                 body: quote! {
                     let mut field_as_repr: ItemRepr = #field_encoded;
-                    self.0 &= !((!0 >> (ITEM_REPR_WIDTH - #field_width)) << #field_offset);
-                    self.0 |= field_as_repr << #field_offset;
+                    self.0 &= !((!0 >> (ITEM_REPR_WIDTH - (#field_width))) << (#field_offset));
+                    self.0 |= field_as_repr << (#field_offset);
                 },
             });
             item_new_args.push(quote!(#field_ident: #field_ty));
         }
-        item_new_stmts.push(quote! {
+        new_stmts.push(quote! {
             bits <<= #field_width;
             bits |= #new_glue;
         });
@@ -573,12 +608,12 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
     let item_repr =
         unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
 
-    item_new_stmts.reverse();
+    new_stmts.reverse();
     item_methods.push(Method {
         sig: quote!(#item_vis fn new(#(#item_new_args),*) -> Self),
         body: quote! {
             let mut bits: ItemRepr = 0;
-            #(#item_new_stmts)*
+            #(#new_stmts)*
 
             Self(bits)
         },
@@ -594,24 +629,16 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
         ident: item_ident,
         body: quote! { (#item_repr); },
         methods: item_methods,
-        bitwise_impl: quote! {
-            const WIDTH: usize = #item_width;
+        bitwise_impl: BitwiseImpl {
+            width: item_width,
+            repr: item_repr,
+            from_repr: quote!(Self(repr)),
+            from_repr_checked: quote! {
+                #from_repr_checked_body
 
-            type Repr = #item_repr;
-
-            fn from_repr(repr: Self::Repr) -> Self {
-                Self(repr)
-            }
-
-            fn from_repr_checked(repr: Self::Repr) -> Option<Self> {
-                todo!();
-
-                Some(Self::from_repr(repr))
-            }
-
-            fn to_repr(&self) -> Self::Repr {
-                self.0
-            }
+                Some(Self(repr))
+            },
+            to_repr: quote!(self.0),
         },
     }
     .into_token_stream();
