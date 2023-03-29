@@ -38,18 +38,6 @@ fn make_error(span: Span2, msg: &'static str) -> TokenStream {
     syn::Error::new(span, msg).into_compile_error().into()
 }
 
-/// Generates a Rust snippet to bring associated items from `Bitwise` and `BitwiseExt` into scope.
-fn make_fn_prelude(item_ident: &syn::Ident) -> TokenStream2 {
-    quote! {
-        #[allow(unused)]
-        const ITEM_WIDTH: usize = <#item_ident as ::regent::Bitwise>::WIDTH;
-        #[allow(unused)]
-        const ITEM_REPR_WIDTH: usize = <#item_ident as ::regent::BitwiseExt>::REPR_WIDTH;
-        #[allow(unsued)]
-        type ItemRepr = <#item_ident as ::regent::Bitwise>::Repr;
-    }
-}
-
 /// Calls [`fail`] if `$item_generics` is non-empty.
 macro_rules! assert_no_generics {
     ($item_span:expr, $item_generics:expr $(,)?) => {
@@ -61,7 +49,7 @@ macro_rules! assert_no_generics {
 
 /// Calls [`fail`] if `$expected_width` disagrees with `$item_width`.
 macro_rules! assert_expected_width_is_correct {
-    ($expected_width:expr, $item_span:expr, $item_width:expr, $item_prelude:expr $(,)?) => {
+    ($expected_width:expr, $item_span:expr, $item_width:expr, $prelude:expr $(,)?) => {
         if let Some(expected_width) = $expected_width {
             match &$item_width {
                 Width::Lit(actual_width) => {
@@ -73,7 +61,7 @@ macro_rules! assert_expected_width_is_correct {
                     // We don't have enough information to evaluate `actual_width` at macro
                     // evaluation time, but we can generate Rust code to do so at compile-time.
 
-                    $item_prelude.extend(quote! {
+                    $prelude.extend(quote! {
                         const _: () = if #expected_width != (#actual_width) {
                             ::core::panicking::panic("expected width of item does not match actual width");
                         };
@@ -101,17 +89,24 @@ impl Width {
     }
 }
 
-// I no longer remember if we use this anymore, but it can't hurt to have (right?).
-impl std::ops::Add for Width {
-    type Output = Self;
+macro_rules! impl_binop_for_width {
+    ($trait:ident, $fn:ident, $op:tt $(,)?) => {
+        impl std::ops::$trait for Width {
+            type Output = Self;
 
-    fn add(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Self::Lit(lhs), Self::Lit(rhs)) => Self::Lit(lhs + rhs),
-            (lhs, rhs) => Self::Expr(quote!(#lhs + #rhs)),
+            fn $fn(self, rhs: Self) -> Self::Output {
+                match (self, rhs) {
+                    (Self::Lit(lhs), Self::Lit(rhs)) => Self::Lit(lhs $op rhs),
+                    (lhs, rhs) => Self::Expr(quote!(#lhs $op #rhs)),
+                }
+            }
         }
-    }
+    };
 }
+
+impl_binop_for_width!(Mul, mul, *);
+// I no longer remember if we use this one anymore, but it can't hurt to have (right?).
+impl_binop_for_width!(Add, add, +);
 
 impl std::ops::AddAssign<&Self> for Width {
     fn add_assign(&mut self, rhs: &Self) {
@@ -141,18 +136,7 @@ impl std::iter::Sum for Width {
     }
 }
 
-impl std::ops::Mul for Width {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Self::Lit(lhs), Self::Lit(rhs)) => Self::Lit(lhs * rhs),
-            (lhs, rhs) => Self::Expr(quote!(#lhs * #rhs)),
-        }
-    }
-}
-
-impl quote::ToTokens for Width {
+impl ToTokens for Width {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         match self {
             Self::Lit(width) => {
@@ -199,8 +183,76 @@ fn determine_item_repr(
     if repr.exists() {
         Ok(repr)
     } else {
-        Err(make_error(item_span, "item cannot be represented by any existing unsigned integer primitive"))
+        Err(make_error(
+            item_span,
+            "item cannot be represented by any existing unsigned integer primitive",
+        ))
     }
+}
+
+struct Item {
+    attrs: TokenStream2,
+    vis: syn::Visibility,
+    token: TokenStream2,
+    ident: syn::Ident,
+    body: TokenStream2,
+    methods: Vec<Method>,
+    bitwise_impl: TokenStream2,
+}
+
+impl ToTokens for Item {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        let attrs = &self.attrs;
+        let vis = &self.vis;
+        let token = &self.token;
+        let ident = &self.ident;
+        let body = &self.body;
+        let method_prelude = quote! {
+            #[allow(unused)]
+            const ITEM_WIDTH: usize = <#ident as ::regent::Bitwise>::WIDTH;
+            #[allow(unused)]
+            const ITEM_REPR_WIDTH: usize = <#ident as ::regent::BitwiseExt>::REPR_WIDTH;
+            #[allow(unsued)]
+            type ItemRepr = <#ident as ::regent::Bitwise>::Repr;
+        };
+        let methods: TokenStream2 = self
+            .methods
+            .iter()
+            .map(|it| {
+                let sig = &it.sig;
+                let body = &it.body;
+
+                quote! {
+                    #sig {
+                        #method_prelude
+                        #body
+                    }
+                }
+            })
+            .collect();
+        let bitwise_impl = &self.bitwise_impl;
+
+        let impl_trait_token =
+            if cfg!(feature = "nightly") { quote!(impl const) } else { quote!(impl) };
+
+        tokens.extend(quote! {
+            #attrs
+            #vis #token #ident #body
+
+            impl #ident {
+                #methods
+            }
+
+            #impl_trait_token ::regent::Bitwise for #ident {
+                #bitwise_impl
+            }
+        })
+    }
+}
+
+struct Method {
+    sig: TokenStream2,
+    body: TokenStream2,
 }
 
 /// Does the thing.
@@ -220,17 +272,17 @@ pub fn bitwise(attr: TokenStream, item: TokenStream) -> TokenStream {
     // FIXME: don't unwrap.
     let item_args = ItemArgs::from_list(&item_args).unwrap();
     if item_args.size.is_some() && item_args.width.is_some() {
-        fail!(Span2::call_site(), "'size' and 'width' are mutually exclusive arguments to the 'bitwise' macro");
+        fail!(
+            Span2::call_site(),
+            "'size' and 'width' are mutually exclusive arguments to the 'bitwise' macro"
+        );
     }
     let expected_width = item_args.width.or_else(|| item_args.size.map(|it| it * 8));
 
     match syn::parse_macro_input!(item as syn::Item) {
         syn::Item::Enum(item) => bitwise_on_enum(expected_width, item),
         syn::Item::Struct(item) => bitwise_on_struct(expected_width, item),
-        _ => make_error(
-            Span2::call_site(),
-            "'bitwise' can only be applied to structs and enums",
-        ),
+        _ => make_error(Span2::call_site(), "'bitwise' can only be applied to structs and enums"),
     }
 }
 
@@ -269,8 +321,6 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
         ..
     } = item;
 
-    let mut item_prelude = TokenStream2::new();
-    let fn_prelude = make_fn_prelude(&item_ident);
 
     // This is a 'fallback span' for when a more precise span is unavailable.
     let item_span = item_struct.span;
@@ -279,11 +329,8 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
 
     // This is the total bit-width of all fields.
     let mut item_width = Width::zero();
-    // This is a list of methods (or pairs of methods) we generate for `#item_ident`.
-    //
-    // Specifically, each element is a pair of getter and setter methods for a particular field of
-    // `#item_ident`.
-    let mut item_fns = Vec::new();
+    // This is a list of methods we generate for `#item_ident`.
+    let mut item_methods = Vec::new();
     // This is a list of all arguments accepted by `#item_ident::new`.
     //
     // These arguments map one-to-one to the fields of `#item_ident`.
@@ -294,6 +341,133 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
 
     // Process fields.
     for (i, field) in item_fields.into_iter().enumerate() {
+        impl Type {
+            fn decode(
+                &self,
+                field_as_repr: TokenStream2,
+                field_width: &Width,
+            ) -> TokenStream2 {
+                match self {
+                    Self::Prime(ty) => ty.decode(field_as_repr, field_width),
+                    Self::Tuple(tys) => {
+                        let mut tmp_elems = Vec::new();
+                        for ty in tys.iter().rev() {
+                            let elem_width = ty.width();
+                            let elem_decoded =
+                                ty.decode(field_as_repr.clone(), &elem_width);
+                            tmp_elems.push(quote!({
+                                let elem = #elem_decoded;
+                                #field_as_repr >>= #elem_width;
+
+                                elem
+                            }));
+                        }
+                        let mut elems = Vec::new();
+                        for i in (0..tys.len()).rev() {
+                            let i = syn::Index::from(i);
+                            elems.push(quote!(tmp.#i));
+                        }
+
+                        quote!({
+                            let tmp = (#(#tmp_elems),*);
+
+                            (#(#elems),*)
+                        })
+                    }
+                    Self::Array { ty, len } => {
+                        let elem_width = ty.width();
+                        let elem_decoded =
+                            ty.decode(field_as_repr.clone(), &elem_width);
+                        let mut elems = Vec::new();
+                        for _ in 0..(*len) {
+                            elems.push(quote! { get_elem() });
+                        }
+
+                        quote!({
+                            let mut get_elem = || {
+                                let elem = #elem_decoded;
+                                #field_as_repr >>= #elem_width;
+
+                                elem
+                            };
+
+                            [#(#elems),*]
+                        })
+                    }
+                }
+            }
+
+            fn encode(
+                &self,
+                field: TokenStream2,
+                field_width: &Width,
+            ) -> TokenStream2 {
+                match self {
+                    Self::Prime(ty) => ty.encode(field, field_width),
+                    Self::Tuple(tys) => {
+                        let mut block_body = quote! { let mut result = 0; };
+                        for (i, ty) in tys.iter().enumerate() {
+                            let i = syn::Index::from(i);
+                            let elem_width = ty.width();
+                            let elem_encoded =
+                                ty.encode(quote!(#field.#i), &elem_width);
+                            block_body.extend(quote! {
+                                result <<= #elem_width;
+                                result |= #elem_encoded;
+                            });
+                        }
+                        block_body.extend(quote!(result));
+
+                        quote!({ #block_body })
+                    }
+                    Self::Array { ty, len } => {
+                        let elem_width = ty.width();
+                        let elem_encoded =
+                            ty.encode(quote!(#field[i]), &elem_width);
+
+                        quote!({
+                            let mut result = 0;
+                            for i in 0..#len {
+                                result <<= #elem_width;
+                                result |= #elem_encoded;
+                            }
+
+                            result
+                        })
+                    }
+                }
+            }
+        }
+
+        impl PrimeType {
+            fn decode(
+                &self,
+                field_as_repr: TokenStream2,
+                field_width: &Width,
+            ) -> TokenStream2 {
+                let inner = quote! { (#field_as_repr & (!0 >> (ITEM_REPR_WIDTH - #field_width))) };
+
+                match self {
+                    Self::Bool => quote! { #inner == 1 },
+                    Self::UInt(_) => quote! { #inner as _ },
+                    Self::Other(_) => quote! { ::regent::Bitwise::from_repr(#inner) },
+                }
+            }
+
+            fn encode(
+                &self,
+                field: TokenStream2,
+                field_width: &Width,
+            ) -> TokenStream2 {
+                let expr = match self {
+                    Self::Other(_) => quote! { ::regent::Bitwise::to_repr(#field) },
+                    _ => quote! { (#field as ItemRepr) },
+                };
+
+                quote! { #expr & (!0 >> (ITEM_REPR_WIDTH - #field_width)) }
+            }
+        }
+
         let syn::Field {
             attrs: field_attrs, ident: field_ident, ty: field_ty, vis: field_vis, ..
         } = field;
@@ -343,29 +517,21 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
             }
         }
 
+        let new_glue: TokenStream2;
         if let Some(field_value) = field_value {
             // This is the simple case for constant fields only. We don't need to generate getters
             // or setters.
 
-            let new_glue =
-                field_ty.field_setter_glue(field_value, quote!(field_as_repr), &field_width);
-
-            item_new_stmts.push(quote! {
-                bits <<= #field_width;
-                let mut field_as_repr: ItemRepr = 0;
-                #new_glue
-                bits |= field_as_repr;
-            });
+            new_glue = field_ty.encode(field_value, &field_width);
         } else {
             // This is the more complicated case for non-constant fields.
 
-            let field_getter_glue =
-                field_ty.field_getter_glue(quote!(field), quote!(field_as_repr), &field_width);
-            let field_setter_glue =
-                field_ty.field_setter_glue(quote!(field), quote!(field_as_repr), &field_width);
-            let new_glue = field_ty.field_setter_glue(
+            let field_decoded =
+                field_ty.decode(quote!(field_as_repr), &field_width);
+            let field_encoded =
+                field_ty.encode(quote!(field), &field_width);
+            new_glue = field_ty.encode(
                 field_ident.to_token_stream(),
-                quote!(field_as_repr),
                 &field_width,
             );
 
@@ -378,63 +544,57 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 );
             }
 
-            item_fns.push(quote! {
-                #field_vis fn #field_getter_ident(&self) -> #field_ty {
-                    #fn_prelude
-
-                    let mut field: #field_ty;
+            item_methods.push(Method {
+                sig: quote!(#field_vis fn #field_getter_ident(&self) -> #field_ty),
+                body: quote! {
                     let mut field_as_repr = self.0 >> #field_offset;
-                    #field_getter_glue
 
-                    field
-                }
-
-                #field_vis fn #field_setter_ident(&mut self, field: #field_ty) {
-                    #fn_prelude
-
-                    let mut field_as_repr: ItemRepr = 0;
-                    #field_setter_glue
-
+                    #field_decoded
+                },
+            });
+            item_methods.push(Method {
+                sig: quote!(#field_vis fn #field_setter_ident(&mut self, field: #field_ty)),
+                body: quote! {
+                    let mut field_as_repr: ItemRepr = #field_encoded;
                     self.0 &= !((!0 >> (ITEM_REPR_WIDTH - #field_width)) << #field_offset);
                     self.0 |= field_as_repr << #field_offset;
-                }
+                },
             });
             item_new_args.push(quote!(#field_ident: #field_ty));
-            item_new_stmts.push(quote! {
-                bits <<= #field_width;
-                let mut field_as_repr: ItemRepr = 0;
-                #new_glue
-                bits |= field_as_repr;
-            });
         }
+        item_new_stmts.push(quote! {
+            bits <<= #field_width;
+            bits |= #new_glue;
+        });
     }
-    assert_expected_width_is_correct!(expected_width, item_span, item_width, item_prelude);
+
+    let mut prelude = TokenStream2::new();
+    assert_expected_width_is_correct!(expected_width, item_span, item_width, prelude);
     let item_repr =
         unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
 
     item_new_stmts.reverse();
+    item_methods.push(Method {
+        sig: quote!(#item_vis fn new(#(#item_new_args),*) -> Self),
+        body: quote! {
+            let mut bits: ItemRepr = 0;
+            #(#item_new_stmts)*
 
-    quote! {
-        #item_prelude
+            Self(bits)
+        },
+    });
 
-        #(#item_attrs)*
-        #[repr(transparent)]
-        #item_vis struct #item_ident(#item_repr);
-
-        impl #item_ident {
-            #item_vis fn new(#(#item_new_args),*) -> Self {
-                #fn_prelude
-
-                let mut bits: ItemRepr = 0;
-                #(#item_new_stmts)*
-
-                Self(bits)
-            }
-
-            #(#item_fns)*
-        }
-
-        impl ::regent::Bitwise for #item_ident {
+    let mut output = Item {
+        attrs: quote! {
+            #(#item_attrs)*
+            #[repr(transparent)]
+        },
+        vis: item_vis,
+        token: quote!(struct),
+        ident: item_ident,
+        body: quote! { (#item_repr); },
+        methods: item_methods,
+        bitwise_impl: quote! {
             const WIDTH: usize = #item_width;
 
             type Repr = #item_repr;
@@ -444,15 +604,20 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
             }
 
             fn from_repr_checked(repr: Self::Repr) -> Option<Self> {
-                todo!()
+                todo!();
+
+                Some(Self::from_repr(repr))
             }
 
             fn to_repr(&self) -> Self::Repr {
                 self.0
             }
-        }
+        },
     }
-    .into()
+    .into_token_stream();
+    output.extend(prelude);
+
+    output.into()
 }
 
 /// The type of an enum variant or struct field.
@@ -519,7 +684,7 @@ impl Type {
     fn exists(&self) -> bool {
         match self {
             Self::Prime(ty) => ty.exists(),
-            Self::Tuple(tys) => tys.iter().all(|it| it.exists()),
+            Self::Tuple(tys) => tys.iter().all(PrimeType::exists),
             Self::Array { ty, .. } => ty.exists(),
         }
     }
@@ -527,7 +692,7 @@ impl Type {
     fn width(&self) -> Width {
         match self {
             Self::Prime(ty) => ty.width(),
-            Self::Tuple(tys) => tys.iter().map(|ty| ty.width()).sum(),
+            Self::Tuple(tys) => tys.iter().map(PrimeType::width).sum(),
             Self::Array { ty, len } => ty.width() * Width::Lit(*len),
         }
     }
@@ -549,108 +714,9 @@ impl Type {
 
         Ok(())
     }
-
-    fn field_getter_glue(
-        &self,
-        field: TokenStream2,
-        field_as_repr: TokenStream2,
-        field_width: &Width,
-    ) -> TokenStream2 {
-        match self {
-            Self::Prime(ty) => ty.field_getter_glue(field, field_as_repr, field_width),
-            Self::Tuple(tys) => {
-                let mut tmp_elems = Vec::new();
-                for ty in tys.iter().rev() {
-                    let elem_width = ty.width();
-                    let elem_getter_glue =
-                        ty.field_getter_glue(quote!(elem), field_as_repr.clone(), &elem_width);
-                    tmp_elems.push(quote!({
-                        let elem;
-                        #elem_getter_glue
-                        #field_as_repr >>= #elem_width;
-
-                        elem
-                    }));
-                }
-                let mut elems = Vec::new();
-                for i in (0..tys.len()).rev() {
-                    let i = syn::Index::from(i);
-                    elems.push(quote!(tmp.#i));
-                }
-
-                quote! {
-                    #field = {
-                        let tmp = (#(#tmp_elems),*);
-
-                        (#(#elems),*)
-                    };
-                }
-            }
-            Self::Array { ty, len } => {
-                let elem_width = ty.width();
-                let elem_getter_glue =
-                    ty.field_getter_glue(quote!(elem), field_as_repr.clone(), &elem_width);
-
-                let mut elems = Vec::new();
-                for _ in 0..(*len) {
-                    elems.push(quote! { get_elem() });
-                }
-
-                quote! {
-                    let mut get_elem = || {
-                        let elem;
-                        #elem_getter_glue
-                        #field_as_repr >>= #elem_width;
-
-                        elem
-                    };
-                    #field = [#(#elems),*];
-                }
-            }
-        }
-    }
-
-    fn field_setter_glue(
-        &self,
-        field: TokenStream2,
-        field_as_repr: TokenStream2,
-        field_width: &Width,
-    ) -> TokenStream2 {
-        match self {
-            Self::Prime(ty) => ty.field_setter_glue(field, field_as_repr, field_width),
-            Self::Tuple(tys) => {
-                let mut result = quote! { #field_as_repr = 0; };
-                for (i, ty) in tys.iter().enumerate() {
-                    let i = syn::Index::from(i);
-                    let elem_width = ty.width();
-                    let elem_getter_glue =
-                        ty.field_setter_glue(quote!(#field.#i), field_as_repr.clone(), &elem_width);
-                    result.extend(quote! {
-                        #elem_getter_glue
-                        #field_as_repr <<= #elem_width;
-                    });
-                }
-
-                result
-            }
-            Self::Array { ty, len } => {
-                let elem_width = ty.width();
-                let elem_getter_glue =
-                    ty.field_setter_glue(quote!(#field[i]), field_as_repr.clone(), &elem_width);
-
-                quote! {
-                    field_as_repr = 0;
-                    for i in 0..#len {
-                        #elem_getter_glue
-                        #field_as_repr <<= #elem_width;
-                    }
-                }
-            }
-        }
-    }
 }
 
-impl quote::ToTokens for Type {
+impl ToTokens for Type {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         match self {
             Self::Prime(ty) => {
@@ -708,41 +774,9 @@ impl PrimeType {
             Self::Other(ty) => Width::Expr(quote!(<#ty as ::regent::Bitwise>::WIDTH)),
         }
     }
-
-    fn field_getter_glue(
-        &self,
-        field: TokenStream2,
-        field_as_repr: TokenStream2,
-        field_width: &Width,
-    ) -> TokenStream2 {
-        let inner = quote! { (#field_as_repr & (!0 >> (ITEM_REPR_WIDTH - #field_width))) };
-        let expr = match self {
-            Self::Bool => quote! { #inner == 1 },
-            Self::UInt(_) => quote! { #inner as _ },
-            Self::Other(_) => quote! { #inner.into() },
-        };
-
-        quote! { #field = #expr; }
-    }
-
-    fn field_setter_glue(
-        &self,
-        field: TokenStream2,
-        field_as_repr: TokenStream2,
-        field_width: &Width,
-    ) -> TokenStream2 {
-        let expr = match self {
-            Self::Other(_) => quote! { <ItemRepr as ::core::convert::From>::from(#field) },
-            _ => quote! { #field as ItemRepr },
-        };
-
-        quote! {
-            #field_as_repr |= (#expr) & (!0 >> (ITEM_REPR_WIDTH - #field_width));
-        }
-    }
 }
 
-impl quote::ToTokens for PrimeType {
+impl ToTokens for PrimeType {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         match self {
             Self::Bool => {
@@ -805,7 +839,7 @@ impl UIntType {
     }
 }
 
-impl quote::ToTokens for UIntType {
+impl ToTokens for UIntType {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         tokens.extend(format_ident!("u{}", self.width).into_token_stream());
     }

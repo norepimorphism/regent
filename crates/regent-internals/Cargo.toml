@@ -13,6 +13,10 @@ license = "MPL-2.0"
 [lib]
 proc-macro = true
 
+[features]
+default = []
+nightly = []
+
 [dependencies]
 darling = "0.14"
 quote = { version = "1.0", default-features = false }
