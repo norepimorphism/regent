@@ -2,7 +2,7 @@
 
 [package]
 name = "regent"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["norepimorphism <norepi@protonmail.com>"]
 edition = "2021"
 description = "Bitfields in Rust"
@@ -13,4 +13,4 @@ keywords = ["bitfield"]
 categories = ["data-structures", "encoding"]
 
 [dependencies]
-regent-internals = { path = "../regent-internals", version = "0.1.0" }
+regent-internals = { path = "../regent-internals", version = "0.2.0" }
