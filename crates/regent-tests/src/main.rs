@@ -3,9 +3,19 @@
 use regent::{bitwise, Bitwise as _};
 
 fn main() {
+    test_enum();
     test_heterogeneous_tuple_field();
     test_constant_fields();
     test_all_item_widths();
+}
+
+fn test_enum() {
+    #[bitwise]
+    enum A {
+        A,
+        B,
+        C,
+    }
 }
 
 fn test_heterogeneous_tuple_field() {

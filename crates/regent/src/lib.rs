@@ -14,7 +14,7 @@ pub trait Bitwise: Sized {
     /// The unsigned integer primitive that represents this type in-memory.
     type Repr;
 
-    fn from_repr(repr: Self::Repr) -> Self;
+    unsafe fn from_repr_unchecked(repr: Self::Repr) -> Self;
 
     fn from_repr_checked(repr: Self::Repr) -> Option<Self>;
 

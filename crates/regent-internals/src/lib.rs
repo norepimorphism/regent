@@ -153,7 +153,7 @@ fn determine_item_repr(
     expected_width: Option<usize>,
     item_span: Span2,
     item_attrs: &mut Vec<syn::Attribute>,
-    item_calc_width: &Width,
+    item_width: &Width,
 ) -> Result<UIntType, TokenStream> {
     let repr = if let Some((i, attr)) =
         item_attrs.iter_mut().enumerate().find(|(_, attr)| attr.path.is_ident("repr"))
@@ -169,7 +169,7 @@ fn determine_item_repr(
     } else if let Some(width) = expected_width {
         UIntType { width }.round_up()
     } else {
-        match item_calc_width {
+        match item_width {
             Width::Lit(width) => UIntType { width: *width }.round_up(),
             Width::Expr(_) => {
                 return Err(make_error(
@@ -232,9 +232,15 @@ impl ToTokens for Item {
             .collect();
         let bitwise_width = &self.bitwise_impl.width;
         let bitwise_repr = &self.bitwise_impl.repr;
-        let bitwise_from_repr = &self.bitwise_impl.from_repr;
+        let bitwise_from_repr_unchecked = &self.bitwise_impl.from_repr_unchecked;
         let bitwise_from_repr_checked = &self.bitwise_impl.from_repr_checked;
         let bitwise_to_repr = &self.bitwise_impl.to_repr;
+
+        let impl_ = if methods.is_empty() {
+            TokenStream2::new()
+        } else {
+            quote!(impl #ident { #methods })
+        };
 
         let impl_trait_token =
             if cfg!(feature = "nightly") { quote!(impl const) } else { quote!(impl) };
@@ -243,18 +249,16 @@ impl ToTokens for Item {
             #attrs
             #vis #token #ident #body
 
-            impl #ident {
-                #methods
-            }
+            #impl_
 
             #impl_trait_token ::regent::Bitwise for #ident {
                 const WIDTH: usize = #bitwise_width;
 
                 type Repr = #bitwise_repr;
 
-                fn from_repr(repr: Self::Repr) -> Self {
+                unsafe fn from_repr_unchecked(repr: Self::Repr) -> Self {
                     #method_prelude
-                    #bitwise_from_repr
+                    #bitwise_from_repr_unchecked
                 }
 
                 fn from_repr_checked(repr: Self::Repr) -> Option<Self> {
@@ -279,7 +283,7 @@ struct Method {
 struct BitwiseImpl {
     width: Width,
     repr: UIntType,
-    from_repr: TokenStream2,
+    from_repr_unchecked: TokenStream2,
     from_repr_checked: TokenStream2,
     to_repr: TokenStream2,
 }
@@ -316,12 +320,13 @@ pub fn bitwise(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// [`bitwise`] for enums.
-fn bitwise_on_enum(_expected_width: Option<usize>, item: syn::ItemEnum) -> TokenStream {
+fn bitwise_on_enum(expected_width: Option<usize>, item: syn::ItemEnum) -> TokenStream {
     let syn::ItemEnum {
-        attrs: item_attrs,
+        attrs: mut item_attrs,
         generics: item_generics,
         ident: item_ident,
         enum_token: item_enum,
+        variants: item_variants,
         vis: item_vis,
         ..
     } = item;
@@ -331,11 +336,69 @@ fn bitwise_on_enum(_expected_width: Option<usize>, item: syn::ItemEnum) -> Token
 
     assert_no_generics!(item_span, item_generics);
 
-    quote! {
-        #(#item_attrs)*
-        #item_vis enum #item_ident {}
+    let mut from_repr_checked_arms = Vec::new();
+    let mut next_discrim = Width::Lit(0);
+    for variant in item_variants.iter() {
+        let variant_ident = &variant.ident;
+        let variant_span = variant_ident.span();
+
+        if !variant.fields.is_empty() {
+            fail!(variant_span, "variant fields are not supported");
+        }
+
+        let variant_discrim = if let Some((_, discrim)) = &variant.discriminant {
+            Width::Expr(discrim.to_token_stream())
+        } else {
+            next_discrim.clone()
+        };
+        from_repr_checked_arms.push(quote!(#variant_discrim => Some(Self::#variant_ident)));
+        next_discrim = variant_discrim + Width::Lit(1);
     }
-    .into()
+
+    let item_width = Width::Lit(match item_variants.len() {
+        1 => 1,
+        other if other.is_power_of_two() => other.ilog2() as _,
+        other => (other.ilog2() + 1) as _,
+    });
+
+    let mut prelude = TokenStream2::new();
+    assert_expected_width_is_correct!(expected_width, item_span, item_width, prelude);
+    let item_repr =
+        unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
+
+    let mut output = Item {
+        attrs: quote! {
+            #(#item_attrs)*
+            #[repr(#item_repr)]
+        },
+        vis: item_vis,
+        token: quote!(enum),
+        ident: item_ident,
+        body: quote!({ #item_variants }),
+        methods: Vec::new(),
+        bitwise_impl: BitwiseImpl {
+            width: item_width,
+            repr: item_repr,
+            from_repr_unchecked: quote! {
+                // FIXME: is there a less 'wildly unsafe' version to this?
+                ::core::mem::transmute(repr)
+            },
+            from_repr_checked: quote! {
+                match repr as usize {
+                    #(#from_repr_checked_arms,)*
+                    _ => None,
+                }
+            },
+            to_repr: quote! {
+                // FIXME: is there an equivalent safe version?
+                unsafe { *(self as *const Self as *const _) }
+            },
+        },
+    }
+    .into_token_stream();
+    output.extend(prelude);
+
+    output.into()
 }
 
 /// [`bitwise`] for structs.
@@ -349,7 +412,6 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
         vis: item_vis,
         ..
     } = item;
-
 
     // This is a 'fallback span' for when a more precise span is unavailable.
     let item_span = item_struct.span;
@@ -632,7 +694,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
         bitwise_impl: BitwiseImpl {
             width: item_width,
             repr: item_repr,
-            from_repr: quote!(Self(repr)),
+            from_repr_unchecked: quote!(Self(repr)),
             from_repr_checked: quote! {
                 #from_repr_checked_body
 
