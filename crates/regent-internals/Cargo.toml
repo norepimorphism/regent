@@ -19,5 +19,5 @@ nightly = []
 
 [dependencies]
 darling = "0.14"
-quote = { version = "1.0", default-features = false }
-syn = { version = "1.0", default-features = false, features = ["full"] }
+quote = { version = "^1.0.25", default-features = false }
+syn = { version = "2.0", features = ["full"] }
