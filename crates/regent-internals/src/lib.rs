@@ -18,7 +18,6 @@ use std::{
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span as Span2, TokenStream as TokenStream2};
-use quote::{format_ident, quote, ToTokens};
 use syn::{punctuated::Punctuated, spanned::Spanned as _};
 
 ///// UTILITY MACROS ///////////////////////////////////////////////////////////////////////////////
@@ -243,27 +242,34 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 // Common identifiers.
                 let elem_ident = syn::Ident::new("elem", span);
                 let get_elem_ident = syn::Ident::new("get_elem", span);
+                let tmp_ident = syn::Ident::new("tmp", span);
                 // Common tokens.
                 let brace_token = syn::token::Brace(span);
                 let bracket_token = syn::token::Bracket(span);
+                let dot_token = syn::Token![.](span);
                 let eq_token = syn::Token![=](span);
                 let let_token = syn::Token![let](span);
                 let or_token = syn::Token![|](span);
                 let paren_token = syn::token::Paren(span);
                 let semi_token = syn::Token![;](span);
 
-                // This closure generates a block that extracts the next element from a composite
+                // The strategy for container types is to create a temporary container formed from
+                // block expressions that continuously bit-shift the next element to the bottom of
+                // `repr` and then feed those elements, in reverse order, to another container.
+                // Reversal is necessary because we take from the least-significant bits of `repr`,
+                // which represent the current last element.
+
+                // This closure generates a block that extracts the next element from a container
                 // type (i.e., tuple or array).
                 let get_elem_block = |elem_ty: &PrimeType| {
                     let elem_width = elem_ty.width();
 
-                    // This looks like:
-                    //   {
-                    //       let elem = /* decoded value from #repr_expr */;
-                    //       #repr_expr >>= #elem_width;
+                    // {
+                    //     let elem = /* decoded value from #repr_expr */;
+                    //     #repr_expr >>= #elem_width;
                     //
-                    //       elem
-                    //   }
+                    //     elem
+                    // }
                     syn::Block {
                         brace_token,
                         stmts: vec![
@@ -310,50 +316,22 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                         ],
                     }
                 };
-
-                match self {
-                    Self::Prime(ty) => ty.decode(repr_width, repr_expr),
-                    Self::Tuple(elem_tys) => {
-                        // The strategy is to create a temporary tuple formed from block expressions
-                        // that continuously bit-shift the next element to the bottom of `repr` and
-                        // then feed those tuple elements, in reverse order, to another tuple.
-                        // Reversal is necessary in this case because we take from the
-                        // least-significant bits of `repr`, which represent the last tuple element.
-
-                        let tmp_ident = syn::Ident::new("tmp", span);
-
-                        type Elements = Punctuated<syn::Expr, syn::Token![,]>;
+                type Elements = Punctuated<syn::Expr, syn::Token![,]>;
+                // This closure produces a 2-tuple containing the local variable representing the
+                // temporary container and an expression that evaluates to the final container, in
+                // that order.
+                let make_tmp_local_and_elems_expr =
+                    |elem_tys: PrimeType,
+                     get_elem_expr: fn(&PrimeType) -> syn::Expr,
+                     make_accessor: fn(usize) -> syn::Expr,
+                     make_container: fn(Elements) -> syn::Expr| {
                         let (tmp_elems, elems): (Elements, Elements) = elem_tys
                             .iter()
                             .enumerate()
                             .rev()
-                            .map(|(i, elem_ty)| {
-                                (
-                                    // #get_elem_block
-                                    syn::Expr::Block(syn::ExprBlock {
-                                        attrs: Vec::new(),
-                                        label: None,
-                                        block: get_elem_block(elem_ty),
-                                    }),
-                                    // tmp.#i
-                                    syn::Expr::Field(syn::ExprField {
-                                        attrs: Vec::new(),
-                                        base: Box::new(
-                                            syn::ExprPath {
-                                                attrs: Vec::new(),
-                                                qself: None,
-                                                path: tmp_ident.into(),
-                                            }
-                                            .into(),
-                                        ),
-                                        dot_token: syn::Token![.](span),
-                                        member: syn::Member::Unnamed(i.into()),
-                                    }),
-                                )
-                            })
+                            .map(|(i, elem_ty)| (get_elem_expr(elem_ty), make_accessor(i)))
                             .unzip();
-                        // This looks like:
-                        //   let tmp = (#get_elem_block, #get_elem_block, ...);
+                        // let tmp = (#get_elem_block, #get_elem_block, ...);
                         let tmp_local = syn::Local {
                             attrs: Vec::new(),
                             let_token,
@@ -367,22 +345,47 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                             .into(),
                             init: Some(syn::LocalInit {
                                 eq_token,
-                                expr: Box::new(
-                                    syn::ExprTuple {
-                                        attrs: Vec::new(),
-                                        paren_token,
-                                        elems: tmp_elems,
-                                    }
-                                    .into(),
-                                ),
+                                expr: Box::new(make_container(tmp_elems)),
                                 diverge: None,
                             }),
                             semi_token,
                         };
-                        // This looks like:
-                        //   (..., tmp.1, tmp.0)
-                        let elems_expr =
-                            syn::ExprTuple { attrs: Vec::new(), paren_token, elems }.into();
+                        let elems_expr = make_container(elems);
+
+                        (tmp_local, elems_expr)
+                    };
+
+                match self {
+                    Self::Prime(ty) => ty.decode(repr_width, repr_expr),
+                    Self::Tuple(elem_tys) => {
+                        let (tmp_local, elems_expr) = make_tmp_local_and_elems_expr(
+                            elem_tys,
+                            // #get_elem_block
+                            |elem_ty| {
+                                syn::Expr::Block(syn::ExprBlock {
+                                    attrs: Vec::new(),
+                                    label: None,
+                                    block: get_elem_block(elem_ty),
+                                })
+                            },
+                            |i| {
+                                // tmp.#i
+                                syn::Expr::Field(syn::ExprField {
+                                    attrs: Vec::new(),
+                                    base: Box::new(
+                                        syn::ExprPath {
+                                            attrs: Vec::new(),
+                                            qself: None,
+                                            path: tmp_ident.into(),
+                                        }
+                                        .into(),
+                                    ),
+                                    dot_token,
+                                    member: syn::Member::Unnamed(i.into()),
+                                })
+                            },
+                            |elems| syn::ExprTuple { attrs: Vec::new(), paren_token, elems }.into(),
+                        );
 
                         syn::ExprBlock {
                             attrs: Vec::new(),
@@ -397,9 +400,8 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                         }
                         .into()
                     }
-                    Self::Array { ty, len } => {
-                        // This looks like:
-                        //   let get_elem = || #get_elem_block;
+                    Self::Array { ty: elem_ty, len } => {
+                        // let get_elem = || #get_elem_block;
                         let get_elem_local = syn::Local {
                             attrs: Vec::new(),
                             let_token,
@@ -429,7 +431,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                                             syn::ExprBlock {
                                                 attrs: Vec::new(),
                                                 label: None,
-                                                block: get_elem_block(ty),
+                                                block: get_elem_block(elem_ty),
                                             }
                                             .into(),
                                         ),
@@ -440,33 +442,49 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                             }),
                             semi_token,
                         };
-                        // This looks like:
-                        //   get_elem()
-                        let get_item_expr_call = syn::ExprCall {
-                            attrs: Vec::new(),
-                            func: Box::new(
-                                syn::ExprPath {
+                        let (tmp_local, elems_expr) = make_tmp_local_and_elems_expr(
+                            repeat(elem_ty).take(len),
+                            // get_elem()
+                            |elem_ty| {
+                                syn::ExprCall {
                                     attrs: Vec::new(),
-                                    qself: None,
-                                    path: get_elem_ident.into(),
+                                    func: Box::new(
+                                        syn::ExprPath {
+                                            attrs: Vec::new(),
+                                            qself: None,
+                                            path: get_elem_ident.into(),
+                                        }
+                                        .into(),
+                                    ),
+                                    paren_token,
+                                    args: Punctuated::new(),
                                 }
-                                .into(),
-                            ),
-                            paren_token,
-                            args: Punctuated::new(),
-                        };
-                        // This looks like:
-                        //   [#get_item_expr_call, #get_item_expr_call, ...]
-                        let elems_expr = syn::ExprArray {
-                            attrs: Vec::new(),
-                            bracket_token,
-                            elems: repeat(syn::Expr::from(get_item_expr_call)).take(*len).collect(),
-                        }
-                        .into();
+                                .into()
+                            },
+                            |i| {
+                                // tmp.#i
+                                syn::Expr::Field(syn::ExprField {
+                                    attrs: Vec::new(),
+                                    base: Box::new(
+                                        syn::ExprPath {
+                                            attrs: Vec::new(),
+                                            qself: None,
+                                            path: tmp_ident.into(),
+                                        }
+                                        .into(),
+                                    ),
+                                    dot_token,
+                                    member: syn::Member::Unnamed(i.into()),
+                                })
+                            },
+                            |elems| {
+                                syn::ExprArray { attrs: Vec::new(), bracket_token, elems }.into()
+                            },
+                        );
 
-                        // This looks like:
-                        //   #get_elem_local
-                        //   #result
+                        // #get_elem_local
+                        // #tmp_local
+                        // #elems_expr
                         syn::ExprBlock {
                             attrs: Vec::new(),
                             label: None,
@@ -474,6 +492,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                                 brace_token,
                                 stmts: vec![
                                     syn::Stmt::Local(get_elem_local),
+                                    syn::Stmt::Local(tmp_local),
                                     syn::Stmt::Expr(elems_expr, None),
                                 ],
                             },
@@ -500,13 +519,11 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 let paren_token = syn::token::Paren(span);
                 let semi_token = syn::Token![;](span);
 
-                // This looks like:
-                //   repr
+                // repr
                 let repr_expr: syn::Expr =
                     syn::ExprPath { attrs: Vec::new(), qself: None, path: repr_ident.into() }
                         .into();
-                // This looks like:
-                //   let repr = 0;
+                // let repr = 0;
                 let repr_local = syn::Local {
                     attrs: Vec::new(),
                     let_token,
@@ -532,7 +549,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                     semi_token,
                 };
                 // This closure generates a set of statements that collectively set the next element
-                // in a composite type (i.e., tuple or array).
+                // in a container type (i.e., tuple or array).
                 let set_elem_stmts = |elem_ty: &PrimeType, elem_expr| {
                     let make_stmt = |op, right| {
                         syn::Stmt::Expr(
@@ -547,9 +564,8 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                         )
                     };
 
-                    // This looks like:
-                    //   repr <<= #elem_width;
-                    //   repr |= /* encoded value of #elem_expr */;
+                    // repr <<= #elem_width;
+                    // repr |= /* encoded value of #elem_expr */;
                     [
                         make_stmt(
                             syn::BinOp::ShlAssign(syn::Token![<<=](span)),
@@ -565,19 +581,17 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 match self {
                     Self::Prime(ty) => ty.encode(repr_width, value_expr),
                     Self::Tuple(tys) => {
-                        // This looks like:
-                        //   #repr_local
-                        //   #set_elem_stmts
-                        //   #set_elem_stmts
-                        //   /* ... */
-                        //   #repr_expr
+                        // #repr_local
+                        // #set_elem_stmts
+                        // #set_elem_stmts
+                        // /* ... */
+                        // #repr_expr
                         let stmts = once(syn::Stmt::Local(repr_local))
                             .chain({
                                 tys.iter()
                                     .enumerate()
                                     .map(|(i, elem_ty)| {
-                                        // This looks like:
-                                        //   #value_expr.#i
+                                        // #value_expr.#i
                                         let elem_expr = syn::ExprField {
                                             attrs: Vec::new(),
                                             base: Box::new(value_expr),
@@ -602,8 +616,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                     }
                     Self::Array { ty: elem_ty, len } => {
                         let i_ident = syn::Ident::new("i", span);
-                        // This looks like:
-                        //   #value_expr[i]
+                        // #value_expr[i]
                         let elem_expr = syn::ExprIndex {
                             attrs: Vec::new(),
                             expr: Box::new(value_expr),
@@ -618,10 +631,9 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                             ),
                         }
                         .into();
-                        // This looks like:
-                        //   for i in ..#len {
-                        //       #set_elem_stmts
-                        //  }
+                        // for i in ..#len {
+                        //     #set_elem_stmts
+                        // }
                         let for_loop = syn::ExprForLoop {
                             attrs: Vec::new(),
                             label: None,
@@ -724,10 +736,11 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
         // This is a type used to represent this field in arguments and return types.
         let field_ty = field_ty.as_rust_primitives();
         if !field_ty.exists() {
-            fail!(
-                field_span,
+            return err!(
+                field_span;
                 "'bitwise' field cannot be represented in terms of primitive Rust types"
-            );
+            )
+            .into();
         }
 
         let mut field_value = None;
@@ -848,54 +861,55 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
 ///
 /// [`bitwise`] does not support generic items. This function helps ensure that the current item is
 /// not generic.
-fn check_generics(generics: syn::Generics) -> Result<(), TokenStream> {
+fn check_generics(generics: syn::Generics) -> Result<(), Error> {
     let syn::Generics { params, where_clause, .. } = generics;
     if !params.is_empty() {
-        return Err(make_error(
-            params.span(),
+        return Err(err!(
+            params.span();
             "generics parameters are not supported in this context",
         ));
     }
     if let Some(clause) = where_clause {
-        return Err(make_error(clause.span(), "'where clauses' are not supported in this context"));
+        return Err(err!(clause.span(); "'where clauses' are not supported in this context"));
     }
 
     Ok(())
 }
 
+/// A strategy to enforce the expected bit-width of an item.
 enum EnforceItemWidthStrategy {
     /// The expected width is correct, and nothing need be done.
     None,
     /// The expected width is incorrect, and this error should be returned during macro evaluation.
-    Fail(TokenStream),
+    Fail(Error),
     /// The correctness of the expected width is indeterminate at macro evaluation time, so this
     /// expression should be inserted in a const context to perform the check at compile-time.
     ConstCheck(syn::Expr),
 }
 
 impl EnforceItemWidthStrategy {
-    /// Devises a strategy to enforce the expected bit-width of an item.
+    /// Devises an `EnforceItemWidthStrategy`.
     ///
     /// [`bitwise`] accepts `size` and `width` attribute arguments which are intended to make
-    /// compile-time guarantees about the `Bitwise::WIDTH` of the generated item. In the simple
-    /// case, the width can be calculated exactly during macro evaluation and an error is
-    /// returned if it differs from `expected_width`. Otherwise, if the item is a struct
-    /// containing custom types that implement `Bitwise`, the exact width is indeterminate at
-    /// macro evaluation time and so enforcement of `expected_width` is deferred to compile-time
-    /// via an assertion in a const context.
+    /// compile-time guarantees about the `Bitwise::WIDTH` of the emitted item. In the simple case,
+    /// the width is calculated exactly during macro evaluation and an error is returned if it
+    /// differs from `expected_width`. Otherwise, if the item is a struct containing custom
+    /// implementors of`Bitwise`, the exact width is indeterminate at macro evaluation time and so
+    /// enforcement of `expected_width` is deferred to compile-time via an assertion in a const
+    /// context.
     fn devise(expected_width: usize, actual_width: &Width) -> Self {
         match actual_width {
             Width::Lit { span, value: actual_width } => {
                 if expected_width != *actual_width {
-                    return Self::Fail(make_error(
-                        *span,
-                        format!("item width is {actual_width} bits, should be {expected_width}"),
+                    return Self::Fail(err!(
+                        *span;
+                        "item width is {actual_width} bits, should be {expected_width}",
                     ));
                 }
             }
             Width::Expr(_) => {
-                // We don't have enough information to evaluate `actual_width` at macro
-                // evaluation time, but we can generate Rust code to do so at compile-time.
+                // We don't have enough information to evaluate `actual_width` at macro evaluation
+                // time, but we can emit Rust code to do so at compile-time.
                 return Self::const_check(expected_width, actual_width);
             }
         }
@@ -904,10 +918,10 @@ impl EnforceItemWidthStrategy {
     }
 
     fn const_check(expected_width: usize, actual_width: &Width) -> Self {
-        let actual_width = actual_width.into_grouped_expr();
+        let span = actual_width.span();
+
         // FIXME: print item ident so the user knows that the heck we're talking about
         let panic_msg = format!("item width should be {expected_width}");
-        let span = Span2::call_site();
 
         // This looks like:
         //   if expected_width != actual_width {
@@ -928,12 +942,12 @@ impl EnforceItemWidthStrategy {
                             .into(),
                         ),
                         op: syn::BinOp::Ne(syn::Token![!=](span)),
-                        right: Box::new(actual_width.into()),
+                        right: Box::new(actual_width.into_grouped_expr().into()),
                     }
                     .into(),
                 ),
                 then_branch: syn::Block {
-                    brace_token: Default::default(),
+                    brace_token: syn::token::Brace(span),
                     stmts: vec![syn::Stmt::Expr(
                         syn::ExprCall {
                             attrs: Vec::new(),
@@ -942,25 +956,25 @@ impl EnforceItemWidthStrategy {
                                     attrs: Vec::new(),
                                     qself: None,
                                     path: syn::Path {
-                                        leading_colon: Some(Default::default()),
-                                        segments: Punctuated::from_iter(
-                                            ["core", "panicking", "panic"].map(|it| {
-                                                syn::PathSegment {
-                                                    ident: syn::Ident::new(it, span),
-                                                    arguments: syn::PathArguments::None,
-                                                }
-                                            }),
-                                        ),
+                                        leading_colon: Some(syn::Token![::](span)),
+                                        segments: ["core", "panicking", "panic"]
+                                            .map(|it| syn::PathSegment {
+                                                ident: syn::Ident::new(it, span),
+                                                arguments: syn::PathArguments::None,
+                                            })
+                                            .into_iter()
+                                            .collect(),
                                     },
                                 }
                                 .into(),
                             ),
-                            paren_token: Default::default(),
-                            args: Punctuated::from_iter::<[syn::Expr; 1]>([syn::ExprLit {
+                            paren_token: syn::token::Paren(span),
+                            args: [syn::Expr::Lit(syn::ExprLit {
                                 attrs: Vec::new(),
                                 lit: syn::LitStr::new(&panic_msg, span).into(),
-                            }
-                            .into()]),
+                            })]
+                            .into_iter()
+                            .collect(),
                         }
                         .into(),
                         Some(syn::Token![;](span)),
@@ -1170,7 +1184,7 @@ impl ConstUsizeExpr {
 
         syn::ExprGroup {
             attrs: Vec::new(),
-            group_token: syn::token::Group { span },
+            group_token: syn::token::Group(span),
             expr: Box::new(expr),
         }
     }
@@ -1179,11 +1193,10 @@ impl ConstUsizeExpr {
     fn into_mask(self, repr_width: Self) -> syn::ExprGroup {
         let span = self.span();
 
-        // This looks like:
-        //   !0 >> (#repr_width - #self)
+        // !0 >> (#repr_width - #self)
         syn::ExprGroup {
             attrs: Vec::new(),
-            group_token: syn::token::Group { span },
+            group_token: syn::token::Group(span),
             expr: Box::new(
                 syn::ExprBinary {
                     attrs: Vec::new(),
@@ -1309,7 +1322,7 @@ impl std::iter::Sum for ConstUsizeExpr {
     }
 }
 
-/// The type of an enum variant or struct field.
+/// The type of a struct field.
 #[derive(Clone)]
 enum Type {
     /// A [prime type](PrimeType).

@@ -53,9 +53,13 @@ impl regent::Bitwise for Timestamp {
     const WIDTH: usize = 18;
     type Repr = u32;
 
-    fn from_repr(repr: Self::Repr) -> Self {/* ... */}
+    unsafe fn from_repr_unchecked(repr: Self::Repr) -> Self {/* ... */}
     fn from_repr_checked(repr: Self::Repr) -> Option<Self> {/* ... */}
     fn to_repr(&self) -> Self::Repr {/* ... */}
+}
+
+impl regent::BitwiseExt for Timestamp {
+    const REPR_WIDTH: usize = 32;
 }
 ```
 
@@ -78,7 +82,9 @@ let (year, month, day) = (de.year(), de.month(), de.day());
 
 ### Field Types
 
-The bit width of a field is inferred by the type, which can be `bool`,  an arbitrary-width unsigned integer of the form `u`*width*, or a tuple or array of these types, *with the exception* of zero-sized types such as the 0-width integer `u0`, the unit `()`, and the 0-element array `[_; 0]`, which are explicitly disallowed. Fields, as well as tuple and array elements, are tightly packed and are not aligned in any way.
+The bit width of a field is inferred by the type, which can be `bool`; an arbitrary-width unsigned integer of the form `u`*width*; an implementor of the `regent::Bitwise` trait, such as a type annotated with the `bitwise` attribute; or a tuple or array of the these types.
+
+Fields, as well as tuple and array elements, are tightly packed and are not aligned in any way.
 
 | Type           | Width (bits)                       |
 |----------------|------------------------------------|
@@ -114,7 +120,7 @@ Internally, `Timestamp` is represented in binary as:
 ```txt
    (unused)     day  month  year
 00000000000000 ddddd mmmm yyyyyyyyy
-^ bit 31         ^ bit 15         ^ bit 0
+^ bit 31                          ^ bit 0
 ```
 
 The first field is taken to be 'least-significant', and the last field is 'most-significant'.
@@ -136,7 +142,7 @@ impl Timestamp {
 
 ### Visibility
 
-Regent respects the visibility of both structs and struct fields. Visibility of the struct item propagates to the `new` method, and per-field visibility propagates to getter and setter methods.
+Regent respects the visibility of items and struct fields. Struct visibility propagates to the `new` method, and per-field visibility affects getter and setter methods. Visibility qualifiers are ignored on constant fields.
 
 ### Tuple Structs
 
@@ -182,13 +188,21 @@ struct Complex(
 );
 ```
 
-`Complex::new` initializes the `u32` field with `123_456u32` whereas the `bool` field is initialized with `false`.
+`Complex::new` initializes the `u32` field with `123_456u32`, and the `bool` field is initialized `false`.
 
 ### Restrictions
 
 Regent places some restrictions on how the `bitwise` macro may be used. These include:
 
-- Zero-sized types are disallowed. A struct annotated with `bitwise` cannot be zero-sized, nor can the type of any single field within a struct be zero-sized.
+- Zero-sized types, including the 0-width integer `u0`, the unit `()`, and the 0-element array `[_; 0]`, are disallowed. A struct annotated with `bitwise` cannot be zero-sized, nor can the type of any single field within a struct be zero-sized.
+- Tuples and arrays cannot be nested in a struct field, e.g., you cannot have:
+
+    ```rust
+    #[regent::bitwise]
+    struct A([(u8, bool); 10]);
+    ```
+
+    This may be made a feature in the future.
 - Generic parameters are not supported on structs, e.g., you cannot have:
 
     ```rust
