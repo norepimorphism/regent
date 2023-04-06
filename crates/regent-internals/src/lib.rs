@@ -94,7 +94,6 @@ pub fn bitwise(args: TokenStream, item: TokenStream) -> TokenStream {
     });
     syn::parse_macro_input!(args with item_args_parser);
     if item_args.size.is_some() && item_args.width.is_some() {
-        // FIXME: span
         return err!("`size` and `width` attribute arguments are mutually exclusive").into();
     }
     let expected_width = item_args.width.or_else(|| item_args.size.map(|it| it * 8));
@@ -237,6 +236,26 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
 
         impl Endec for Type {
             fn decode(&self, repr_width: &Width, repr_expr: syn::Expr) -> syn::Expr {
+                match self {
+                    Self::Prime(ty) => ty.decode(repr_width, repr_expr),
+                    _ => unsafe { self.decode_container(repr_width, repr_expr) },
+                }
+            }
+
+            fn encode(&self, repr_width: &Width, value_expr: syn::Expr) -> syn::Expr {
+                match self {
+                    Self::Prime(ty) => ty.encode(repr_width, value_expr),
+                    _ => unsafe { self.encode_container(repr_width, value_expr) },
+                }
+            }
+        }
+
+        impl Type {
+            unsafe fn decode_container(
+                &self,
+                repr_width: &Width,
+                repr_expr: syn::Expr,
+            ) -> syn::Expr {
                 let span = repr_expr.span();
 
                 // Common identifiers.
@@ -356,21 +375,22 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                     };
 
                 match self {
-                    Self::Prime(ty) => ty.decode(repr_width, repr_expr),
+                    Self::Prime(_) => std::hint::unreachable_unchecked(),
                     Self::Tuple(elem_tys) => {
                         let (tmp_local, elems_expr) = make_tmp_local_and_elems_expr(
                             elem_tys,
                             // #get_elem_block
                             |elem_ty| {
-                                syn::Expr::Block(syn::ExprBlock {
+                                syn::ExprBlock {
                                     attrs: Vec::new(),
                                     label: None,
                                     block: get_elem_block(elem_ty),
-                                })
+                                }
+                                .into()
                             },
                             |i| {
                                 // tmp.#i
-                                syn::Expr::Field(syn::ExprField {
+                                syn::ExprField {
                                     attrs: Vec::new(),
                                     base: Box::new(
                                         syn::ExprPath {
@@ -382,7 +402,8 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                                     ),
                                     dot_token,
                                     member: syn::Member::Unnamed(i.into()),
-                                })
+                                }
+                                .into()
                             },
                             |elems| syn::ExprTuple { attrs: Vec::new(), paren_token, elems }.into(),
                         );
@@ -463,7 +484,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                             },
                             |i| {
                                 // tmp.#i
-                                syn::Expr::Field(syn::ExprField {
+                                syn::ExprIndex {
                                     attrs: Vec::new(),
                                     base: Box::new(
                                         syn::ExprPath {
@@ -475,7 +496,8 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                                     ),
                                     dot_token,
                                     member: syn::Member::Unnamed(i.into()),
-                                })
+                                }
+                                .into()
                             },
                             |elems| {
                                 syn::ExprArray { attrs: Vec::new(), bracket_token, elems }.into()
@@ -502,7 +524,11 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 }
             }
 
-            fn encode(&self, repr_width: &Width, value_expr: syn::Expr) -> syn::Expr {
+            unsafe fn encode_container(
+                &self,
+                repr_width: &Width,
+                value_expr: syn::Expr,
+            ) -> syn::Expr {
                 let span = value_expr.span();
 
                 // Common identifiers.
@@ -579,7 +605,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                 };
 
                 match self {
-                    Self::Prime(ty) => ty.encode(repr_width, value_expr),
+                    Self::Prime(_) => std::hint::unreachable_unchecked(),
                     Self::Tuple(tys) => {
                         // #repr_local
                         // #set_elem_stmts
@@ -688,44 +714,138 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
         }
 
         impl Endec for PrimeType {
-            fn decode(&self, repr_width: &Width, repr: syn::Expr) -> syn::Expr {
-                let inner = quote!(#field_as_repr & (!0 >> (ITEM_REPR_WIDTH - (#field_width))));
+            fn decode(&self, repr_width: &Width, repr_expr: syn::Expr) -> syn::Expr {
+                let span = repr_expr.span();
+                let inner = syn::ExprBinary {
+                    attrs: Vec::new(),
+                    left: Box::new(repr_expr),
+                    op: syn::BinOp::BitAnd(syn::Token![&](span)),
+                    right: Box::new(repr_width.into_mask()),
+                }
+                .into();
 
                 match self {
-                    Self::Bool => quote! { (#inner) == 1 },
-                    Self::UInt(_) => quote! { (#inner) as _ },
-                    Self::Other(_) => {
-                        quote!(unsafe { ::regent::Bitwise::from_repr_unchecked(#inner) })
+                    // #inner == 1
+                    Self::Bool => syn::ExprBinary {
+                        attrs: Vec::new(),
+                        left: Box::new(inner),
+                        op: syn::BinOp::Eq(syn::Token![==](span)),
+                        right: Box::new(
+                            syn::ExprLit {
+                                attrs: Vec::new(),
+                                lit: syn::LitInt::new("1", span).into(),
+                            }
+                            .into(),
+                        ),
                     }
+                    .into(),
+                    // #inner as _
+                    Self::UInt(_) => syn::ExprCast {
+                        attrs: Vec::new(),
+                        expr: Box::new(inner),
+                        as_token: syn::Token![as](span),
+                        ty: Box::new(
+                            syn::TypeInfer { underscore_token: syn::Token![_](span) }.into(),
+                        ),
+                    }
+                    .into(),
+                    // unsafe { ::regent::Bitwise::from_repr_unchecked(#inner) }
+                    Self::Other(_) => syn::ExprUnsafe {
+                        attrs: Vec::new(),
+                        unsafe_token: syn::Token![unsafe](span),
+                        block: syn::Block {
+                            brace_token: syn::token::Brace(span),
+                            stmts: vec![syn::Stmt::Expr(
+                                syn::ExprCall {
+                                    attrs: Vec::new(),
+                                    func: Box::new(
+                                        syn::ExprPath {
+                                            attrs: Vec::new(),
+                                            qself: None,
+                                            path: syn::Path {
+                                                leading_colon: Some(syn::Token![::](span)),
+                                                segments: [
+                                                    "regent",
+                                                    "Bitwise",
+                                                    "from_repr_unchecked",
+                                                ]
+                                                .into_iter()
+                                                .collect(),
+                                            },
+                                        }
+                                        .into(),
+                                    ),
+                                    paren_token: syn::token::Paren(span),
+                                    args: [inner].into_iter().collect(),
+                                }
+                                .into(),
+                                None,
+                            )],
+                        },
+                    },
                 }
             }
 
-            fn encode(&self, repr_width: &Width, value: syn::Expr) -> syn::Expr {
-                let expr = match self {
-                    Self::Other(_) => quote! { ::regent::Bitwise::to_repr(#field) },
-                    _ => quote! { (#field as ItemRepr) },
-                };
+            fn encode(&self, repr_width: &Width, value_expr: syn::Expr) -> syn::Expr {
+                let span = value_expr.span();
 
-                quote! { #expr & (!0 >> (ITEM_REPR_WIDTH - (#field_width))) }
+                syn::ExprBinary {
+                    attrs: Vec::new(),
+                    left: Box::new(match self {
+                        // ::regent::Bitwise::to_repr(#value_expr)
+                        Self::Other(_) => syn::ExprCall {
+                            attrs: Vec::new(),
+                            func: Box::new(
+                                syn::ExprPath {
+                                    attrs: Vec::new(),
+                                    qself: None,
+                                    path: syn::Path {
+                                        leading_colon: Some(syn::Token![::](span)),
+                                        segments: ["regent", "Bitwise", "to_repr"]
+                                            .into_iter()
+                                            .collect(),
+                                    },
+                                }
+                                .into(),
+                            ),
+                            paren_token: syn::token::Paren(span),
+                            args: [value_expr].into_iter().collect(),
+                        }
+                        .into(),
+                        // #value_expr as ItemRepr
+                        _ => syn::ExprCast {
+                            attrs: Vec::new(),
+                            expr: Box::new(value_expr),
+                            as_token: syn::Token![as](span),
+                            ty: Box::new(
+                                syn::ExprPath::from(syn::Ident::new("ItemRepr", span)).into(),
+                            ),
+                        }
+                        .into(),
+                    }),
+                    op: syn::BinOp::BitAnd(syn::Token![&](span)),
+                    right: repr_width.into_mask(),
+                }
+                .into()
             }
         }
 
+        let field_span = field.span();
         let syn::Field {
             attrs: field_attrs, ident: field_ident, ty: field_ty, vis: field_vis, ..
         } = field;
 
         let (field_getter_ident, field_setter_ident) = match field_ident {
-            Some(it) => (it.clone(), format_ident!("set_{it}")),
+            Some(it) => (it.clone(), syn::Ident::new(&format!("set_{it}"), it.span())),
             None => (
-                format_ident!("_{i}", span = item_span),
-                format_ident!("set_{i}", span = item_span),
+                syn::Ident::new(&format!("_{i}"), item_span),
+                syn::Ident::new(&format!("set_{i}"), item_span),
             ),
         };
         let field_ident = &field_getter_ident;
-        let field_span = field_getter_ident.span();
 
-        let field_ty = unwrap!(Type::parse(field_span, field_ty));
-        unwrap!(field_ty.validate(field_span));
+        let field_ty = unwrap!(Type::parse(field_span, field_ty).map_err(TokenStream::from));
+        unwrap!(field_ty.validate(field_span).map_err(TokenStream::from));
 
         // This is the position of the least-significant bit of this field.
         let field_offset = item_width.clone();
@@ -761,7 +881,7 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
                     None => quote!(<#field_ty as ::core::default::Default>::default()),
                 });
             } else {
-                fail!(field_span, "invalid attribute")
+                return err!(field_span; "invalid attribute").into();
             }
         }
 
@@ -857,17 +977,16 @@ fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> To
 
 ///// PRIVATE API //////////////////////////////////////////////////////////////////////////////////
 
-/// Returns an error generated by [`make_error`] if `generics` is non-empty.
+/// Returns an [`Error`] if `generics` is non-empty.
 ///
 /// [`bitwise`] does not support generic items. This function helps ensure that the current item is
 /// not generic.
+///
+/// `generics` is passed by-value to discourage its usage after this function is called.
 fn check_generics(generics: syn::Generics) -> Result<(), Error> {
     let syn::Generics { params, where_clause, .. } = generics;
     if !params.is_empty() {
-        return Err(err!(
-            params.span();
-            "generics parameters are not supported in this context",
-        ));
+        return Err(err!(params.span(); "generics parameters are not supported in this context"));
     }
     if let Some(clause) = where_clause {
         return Err(err!(clause.span(); "'where clauses' are not supported in this context"));
@@ -878,7 +997,7 @@ fn check_generics(generics: syn::Generics) -> Result<(), Error> {
 
 /// A strategy to enforce the expected bit-width of an item.
 enum EnforceItemWidthStrategy {
-    /// The expected width is correct, and nothing need be done.
+    /// The expected width is correct, and nothing needs to be done.
     None,
     /// The expected width is incorrect, and this error should be returned during macro evaluation.
     Fail(Error),
@@ -996,20 +1115,20 @@ impl EnforceItemWidthStrategy {
 /// Otherwise, `expected_width` and `item_width` are consulted, in that order, to generate
 /// `UIntType`s of those widths. This function ultimately fails if `item_width` is a compile-time
 /// expression (indeterminate at macro evaluation time) and all previous strategies have been
-/// exhausted, in which case a [`TokenStream`] generated by [`make_error`] is returned.
+/// exhausted, in which case an [`Error`] is returned.
 fn determine_item_repr(
     expected_width: Option<usize>,
     item_span: Span2,
     item_attrs: &mut Vec<syn::Attribute>,
     item_width: &Width,
-) -> Result<UIntType, TokenStream> {
+) -> Result<UIntType, Error> {
     if let Some((i, attr)) =
         item_attrs.iter().enumerate().find(|(_, attr)| attr.path().is_ident("repr"))
     {
         let (arg, arg_span) = match attr.parse_args::<syn::Ident>() {
             Ok(it) => (it.to_string(), it.span()),
             Err(e) => {
-                return Err(e.into_compile_error().into());
+                return Err(Error(e));
             }
         };
         let repr = match UIntType::parse(arg_span, &arg) {
@@ -1018,7 +1137,7 @@ fn determine_item_repr(
                 return Err(e);
             }
             _ => {
-                return Err(make_error(arg_span, "this must be an unsigned integer primitive"));
+                return Err(err!(arg_span; "this must be an unsigned integer primitive"));
             }
         };
         // It shouldn't really matter when we do this; we just need to do it at some point.
@@ -1032,8 +1151,8 @@ fn determine_item_repr(
             match item_width {
                 Width::Lit(width) => UIntType { width: *width },
                 Width::Expr(_) => {
-                    return Err(make_error(
-                        item_span,
+                    return Err(err!(
+                        item_span;
                         "not enough information to compute item width at macro evaluation time",
                     ));
                 }
@@ -1041,8 +1160,8 @@ fn determine_item_repr(
         }
         .round_up();
         if !repr.exists() {
-            return Err(make_error(
-                item_span,
+            return Err(err!(
+                item_span;
                 "this item cannot be represented by any existing integer primitive",
             ));
         }
@@ -1200,6 +1319,7 @@ impl ConstUsizeExpr {
             expr: Box::new(
                 syn::ExprBinary {
                     attrs: Vec::new(),
+                    // !0
                     left: Box::new(
                         syn::ExprUnary {
                             attrs: Vec::new(),
@@ -1214,7 +1334,9 @@ impl ConstUsizeExpr {
                         }
                         .into(),
                     ),
+                    // >>
                     op: syn::BinOp::Shr(syn::Token![>>](span)),
+                    // #repr_width - #self
                     right: Box::new(
                         syn::ExprBinary {
                             attrs: Vec::new(),
@@ -1339,7 +1461,7 @@ enum Type {
 }
 
 impl Type {
-    fn parse(span: Span2, ty: syn::Type) -> Result<Self, TokenStream> {
+    fn parse(span: Span2, ty: syn::Type) -> Result<Self, Error> {
         match ty {
             syn::Type::Path(ty) => PrimeType::parse(span, ty).map(Self::Prime),
             syn::Type::Tuple(syn::TypeTuple { elems: tys, .. }) => {
@@ -1349,7 +1471,7 @@ impl Type {
                         if let syn::Type::Path(ty) = ty {
                             PrimeType::parse(span, ty)
                         } else {
-                            Err(make_error(span, "tuple element type must be a path"))
+                            Err(err!(span; "tuple element type must be a path"))
                         }
                     })
                     .collect::<Result<Vec<PrimeType>, _>>()?;
@@ -1358,18 +1480,18 @@ impl Type {
             }
             syn::Type::Array(syn::TypeArray { elem: ty, len, .. }) => {
                 let syn::Type::Path(ty) = *ty else {
-                    return Err(make_error(span, "array element type must be a path"));
+                    return Err(err!(span; "array element type must be a path"));
                 };
                 let ty = PrimeType::parse(span, ty)?;
                 let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(len), .. }) = len else {
-                    return Err(make_error(span, "array length must be an integer literal"));
+                    return Err(err!(span; "array length must be an integer literal"));
                 };
                 let len =
                     len.base10_parse().map_err(|e| TokenStream::from(e.into_compile_error()))?;
 
                 Ok(Self::Array { ty, len })
             }
-            _ => Err(make_error(span, "unsupported type")),
+            _ => Err(err!(span; "unsupported type")),
         }
     }
 
@@ -1399,16 +1521,16 @@ impl Type {
         }
     }
 
-    fn validate(&self, span: Span2) -> Result<(), TokenStream> {
+    fn validate(&self, span: Span2) -> Result<(), Error> {
         match self {
             Type::Tuple(tys) => {
                 if tys.is_empty() {
-                    return Err(make_error(span, "'bitwise' fields cannot be the unit type"));
+                    return Err(err!(span; "'bitwise' fields cannot be the unit type"));
                 }
             }
             Type::Array { len, .. } => {
                 if *len == 0 {
-                    return Err(make_error(span, "'bitwise' fields cannot be zero-sized arrays"));
+                    return Err(err!(span; "'bitwise' fields cannot be zero-sized arrays"));
                 }
             }
             _ => {}
@@ -1500,15 +1622,16 @@ struct UIntType {
 }
 
 impl UIntType {
-    fn parse(span: Span2, ty: &str) -> Option<Result<Self, TokenStream>> {
+    fn parse(span: Span2, ty: &str) -> Option<Result<Self, Error>> {
         let Some(("", width)) = ty.split_once('u') else {
+            // This is not even an unsigned integer.
             return None;
         };
         let Ok(width) = width.parse() else {
-            return Some(Err(make_error(span, "failed to parse integer width suffix")));
+            return Some(Err(err!(span; "failed to parse integer width suffix")));
         };
         if width == 0 {
-            return Some(Err(make_error(span, "'bitwise' does not support zero-sized types")));
+            return Some(Err(err!(span; "'bitwise' does not support zero-sized types")));
         }
 
         Some(Ok(Self { width }))
@@ -1541,8 +1664,11 @@ impl UIntType {
     }
 }
 
-impl ToTokens for UIntType {
-    fn to_tokens(&self, tokens: &mut TokenStream2) {
-        tokens.extend(format_ident!("u{}", self.width).into_token_stream());
+impl From<UIntType> for syn::TypePath {
+    fn from(ty: UIntType) -> Self {
+        Self {
+            qself: None,
+            path: [format!("u{}", ty.width)].into_iter().collect(),
+        }
     }
 }
