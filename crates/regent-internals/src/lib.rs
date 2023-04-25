@@ -8,17 +8,14 @@
 //
 // Throughout *regent-internals*, we will distinguish between 'macro evaluation time' (when the
 // entrypoint to a proc macro is invoked) and 'compile-time' (when the crate invoking a proc macro
-// is fully-expanded) to explain the kinds of information knowable to [`bitwise`] and which must be
+// is fully-expanded) to explain the kinds of information available to [`bitwise`] and which must be
 // supplied via other means, e.g., in attribute arguments.
 
-use std::{
-    borrow::Cow,
-    iter::{once, repeat},
-};
+use std::borrow::Cow;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span as Span2, TokenStream as TokenStream2};
-use syn::{punctuated::Punctuated, spanned::Spanned as _};
+use syn::spanned::Spanned as _;
 
 ///// UTILITY MACROS ///////////////////////////////////////////////////////////////////////////////
 
@@ -35,16 +32,22 @@ macro_rules! unwrap {
     };
 }
 
-/// Creates an [`Error`] with the given message.
+/// Creates an [`Error`] with the given message and, optionally, span.
+///
+/// If no span is specified, [`Span2::call_site`] is used.
 macro_rules! err {
     ($fmt:expr $(, $fmt_arg:expr)* $(,)?) => {
-        err!(Span2::call_site();  $fmt $(, $fmt_arg)*)
+        err!(proc_macro2::Span::call_site();  $fmt $(, $fmt_arg)*)
     };
     ($span:expr ; $fmt:expr $(, $fmt_arg:expr)* $(,)?) => {
-        Error(syn::Error::new($span, format!($fmt $(, $fmt_arg)*)))
+        $crate::Error(syn::Error::new($span, format!($fmt $(, $fmt_arg)*)))
     };
 }
 
+/// The error type returned by fallible internal functions.
+///
+/// This is a wrapper over [`syn::Error`] and exists only to provide convenience implementations of
+/// [`Into`] for `syn::Error` and [`TokenStream`].
 struct Error(syn::Error);
 
 impl From<Error> for syn::Error {
@@ -61,6 +64,9 @@ impl From<Error> for TokenStream {
 
 ///// PUBLIC API ///////////////////////////////////////////////////////////////////////////////////
 
+mod on_enum;
+mod on_struct;
+
 /// Does the thing.
 ///
 /// See the [README] for usage information.
@@ -68,911 +74,77 @@ impl From<Error> for TokenStream {
 /// [README]: https://github.com/norepimorphism/regent/blob/main/README.md
 #[proc_macro_attribute]
 pub fn bitwise(args: TokenStream, item: TokenStream) -> TokenStream {
-    #[derive(Default)]
-    struct ItemArgs {
-        size: Option<usize>,
-        width: Option<usize>,
-    }
-
-    let mut item_args = ItemArgs::default();
-    let item_args_parser = syn::meta::parser(|meta| {
-        let ident = meta.path.get_ident().ok_or_else(|| -> syn::Error {
-            err!(meta.path.span(); "attribute argument should be an identifier").into()
-        })?;
-        let get_value = || -> Result<usize, _> {
-            meta.value().and_then(|it| it.parse::<syn::LitInt>()).and_then(|it| it.base10_parse())
-        };
-        if ident == "size" {
-            item_args.size = Some(get_value()?);
-        } else if ident == "width" {
-            item_args.width = Some(get_value()?);
-        } else {
-            return Err(err!(ident.span(); "attribute argument is not supported").into());
-        }
-
-        Ok(())
-    });
-    syn::parse_macro_input!(args with item_args_parser);
-    if item_args.size.is_some() && item_args.width.is_some() {
-        return err!("`size` and `width` attribute arguments are mutually exclusive").into();
-    }
-    let expected_width = item_args.width.or_else(|| item_args.size.map(|it| it * 8));
+    let args = Args::parse(args)?;
+    let expected_width = args.expected_width();
 
     match syn::parse_macro_input!(item as _) {
-        syn::Item::Enum(item) => bitwise_on_enum(expected_width, item),
-        syn::Item::Struct(item) => bitwise_on_struct(expected_width, item),
+        syn::Item::Enum(item) => on_enum::bitwise(expected_width, item),
+        syn::Item::Struct(item) => on_struct::bitwise(expected_width, item),
         item => err!(item.span(); "this kind of item is not supported").into(),
     }
 }
 
-/// [`bitwise`] for enums.
-fn bitwise_on_enum(expected_width: Option<usize>, item: syn::ItemEnum) -> TokenStream {
-    check_generics(item.generics);
-    let item_span = item.span();
-    let syn::ItemEnum {
-        attrs: mut item_attrs,
-        generics: item_generics,
-        ident: item_ident,
-        enum_token: item_enum,
-        variants: item_variants,
-        vis: item_vis,
-        ..
-    } = item;
-
-    let mut from_repr_checked_arms = Vec::new();
-    let mut next_discrim = Width::Lit(0);
-    for variant in item_variants.iter() {
-        let variant_ident = &variant.ident;
-        let variant_span = variant_ident.span();
-
-        if !variant.fields.is_empty() {
-            fail!(variant_span, "variant fields are not supported");
-        }
-
-        let variant_discrim = if let Some((_, discrim)) = &variant.discriminant {
-            Width::Expr(discrim.clone())
-        } else {
-            next_discrim.clone()
-        };
-        from_repr_checked_arms.push(quote!(#variant_discrim => Some(Self::#variant_ident)));
-        next_discrim = variant_discrim + Width::Lit(1);
-    }
-
-    let item_width = Width::Lit(match item_variants.len() {
-        1 => 1,
-        other if other.is_power_of_two() => other.ilog2() as _,
-        other => (other.ilog2() + 1) as _,
-    });
-
-    let mut const_ctx = Vec::new();
-    enforce_item_width!(expected_width, item_span, item_width, const_ctx);
-    let item_repr =
-        unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
-    item_attrs.push({
-        let dont_care_span = Span2::call_site();
-
-        syn::Attribute {
-            pound_token: syn::Token![#](dont_care_span),
-            style: syn::AttrStyle::Outer,
-            bracket_token: syn::token::Bracket(dont_care_span),
-            meta: syn::MetaList {
-                path: syn::Ident::new("repr", dont_care_span).into(),
-                delimiter: syn::MacroDelimiter::Paren(syn::token::Paren(dont_care_span)),
-                tokens: item_repr.into_token_stream(),
-            }
-            .into(),
-        }
-    });
-
-    let mut output = Item {
-        attrs: item_attrs,
-        vis: item_vis,
-        token: quote!(enum),
-        ident: item_ident,
-        body: quote!({ #item_variants }),
-        methods: Vec::new(),
-        bitwise_impl: BitwiseImpl {
-            width: item_width,
-            repr: item_repr,
-            from_repr_unchecked: quote! {
-                // FIXME: is there a less 'wildly unsafe' version to this?
-                ::core::mem::transmute(repr)
-            },
-            from_repr_checked: quote! {
-                match repr as usize {
-                    #(#from_repr_checked_arms,)*
-                    _ => None,
-                }
-            },
-            to_repr: quote! {
-                // FIXME: is there an equivalent safe version?
-                unsafe { *(self as *const Self as *const _) }
-            },
-        },
-    }
-    .into_token_stream();
-    output.extend(prelude);
-
-    output.into()
+/// Recognized arguments to the `bitwise` attribute.
+#[derive(Default)]
+struct Args {
+    /// The 'size' argument, if any.
+    ///
+    /// This determines the size, in bytes, of the emitted item. This argument is
+    /// mutually-exclusive with the 'width' argument.
+    size: Option<usize>,
+    /// The 'width' argument, if any.
+    ///
+    /// This determines the width, in bits, of the emitted item. This argument is
+    /// mutually-exclusive with the 'size' argument.
+    width: Option<usize>,
 }
 
-/// [`bitwise`] for structs.
-fn bitwise_on_struct(expected_width: Option<usize>, item: syn::ItemStruct) -> TokenStream {
-    check_generics(item.generics);
-    let item_span = item.span();
-    let syn::ItemStruct {
-        attrs: mut item_attrs,
-        fields: item_fields,
-        ident: item_ident,
-        struct_token: item_struct,
-        vis: item_vis,
-        ..
-    } = item;
-
-    // These next few variables are default-initialized for now and will be continuously updated
-    // during field processing.
-
-    // This is the total bit-width of all fields.
-    let mut item_width = Width::zero(item_span);
-    // This is the list of `impl #item_ident` methods we emit.
-    let mut item_methods = Vec::new();
-    // This is the list of all arguments accepted by `#item_ident::new`.
-    let mut item_new_args = Vec::new();
-    // This is a list of 'snippets' (or series of statements) that initialize the fields in
-    // `#item_ident::new`.
-    let mut item_new_stmts = Vec::new();
-    // FIXME: name is inconsistent
-    let mut from_repr_checked_body = TokenStream2::new();
-
-    // Process fields.
-    for (i, field) in item_fields.into_iter().enumerate() {
-        trait Endec {
-            /// Generates an expression that produces a value of this type from a representation.
-            fn decode(&self, repr_width: &Width, repr_expr: syn::Expr) -> syn::Expr;
-
-            /// Generates an expression that produces a representation from a value of this type.
-            fn encode(&self, repr_width: &Width, value_exprs: syn::Expr) -> syn::Expr;
+impl Args {
+    /// Parses comma-separated attribute arguments from the given [`TokenStream`].
+    fn parse(args: TokenStream) -> Result<Self, TokenStream> {
+        let mut result = Self::default();
+        let error = result.parse_impl(args);
+        if !error.is_empty() {
+            return Err(error);
+        }
+        if result.size.is_some() && result.width.is_some() {
+            return err!("`size` and `width` attribute arguments are mutually exclusive").into();
         }
 
-        impl Endec for Type {
-            fn decode(&self, repr_width: &Width, repr_expr: syn::Expr) -> syn::Expr {
-                match self {
-                    Self::Prime(ty) => ty.decode(repr_width, repr_expr),
-                    _ => unsafe { self.decode_container(repr_width, repr_expr) },
-                }
-            }
+        Ok(result)
+    }
 
-            fn encode(&self, repr_width: &Width, value_expr: syn::Expr) -> syn::Expr {
-                match self {
-                    Self::Prime(ty) => ty.encode(repr_width, value_expr),
-                    _ => unsafe { self.encode_container(repr_width, value_expr) },
-                }
-            }
-        }
-
-        impl Type {
-            unsafe fn decode_container(
-                &self,
-                repr_width: &Width,
-                repr_expr: syn::Expr,
-            ) -> syn::Expr {
-                let span = repr_expr.span();
-
-                // Common identifiers.
-                let elem_ident = syn::Ident::new("elem", span);
-                let get_elem_ident = syn::Ident::new("get_elem", span);
-                let tmp_ident = syn::Ident::new("tmp", span);
-                // Common tokens.
-                let brace_token = syn::token::Brace(span);
-                let bracket_token = syn::token::Bracket(span);
-                let dot_token = syn::Token![.](span);
-                let eq_token = syn::Token![=](span);
-                let let_token = syn::Token![let](span);
-                let or_token = syn::Token![|](span);
-                let paren_token = syn::token::Paren(span);
-                let semi_token = syn::Token![;](span);
-
-                // The strategy for container types is to create a temporary container formed from
-                // block expressions that continuously bit-shift the next element to the bottom of
-                // `repr` and then feed those elements, in reverse order, to another container.
-                // Reversal is necessary because we take from the least-significant bits of `repr`,
-                // which represent the current last element.
-
-                // This closure generates a block that extracts the next element from a container
-                // type (i.e., tuple or array).
-                let get_elem_block = |elem_ty: &PrimeType| {
-                    let elem_width = elem_ty.width();
-
-                    // {
-                    //     let elem = /* decoded value from #repr_expr */;
-                    //     #repr_expr >>= #elem_width;
-                    //
-                    //     elem
-                    // }
-                    syn::Block {
-                        brace_token,
-                        stmts: vec![
-                            // let elem = #elem;
-                            syn::Stmt::Local(syn::Local {
-                                attrs: Vec::new(),
-                                let_token,
-                                pat: syn::PatIdent {
-                                    attrs: Vec::new(),
-                                    by_ref: None,
-                                    mutability: None,
-                                    ident: elem_ident,
-                                    subpat: None,
-                                }
-                                .into(),
-                                init: Some(syn::LocalInit {
-                                    eq_token,
-                                    expr: Box::new(elem_ty.decode(&elem_width, repr_expr.clone())),
-                                    diverge: None,
-                                }),
-                                semi_token,
-                            }),
-                            // #repr_expr >>= #elem_width;
-                            syn::Stmt::Expr(
-                                syn::ExprBinary {
-                                    attrs: Vec::new(),
-                                    left: Box::new(repr_expr),
-                                    op: syn::BinOp::ShrAssign(syn::Token![>>=](span)),
-                                    right: Box::new(elem_width.into_grouped_expr().into()),
-                                }
-                                .into(),
-                                Some(semi_token),
-                            ),
-                            // elem
-                            syn::Stmt::Expr(
-                                syn::ExprPath {
-                                    attrs: Vec::new(),
-                                    qself: None,
-                                    path: elem_ident.into(),
-                                }
-                                .into(),
-                                None,
-                            ),
-                        ],
-                    }
-                };
-                type Elements = Punctuated<syn::Expr, syn::Token![,]>;
-                // This closure produces a 2-tuple containing the local variable representing the
-                // temporary container and an expression that evaluates to the final container, in
-                // that order.
-                let make_tmp_local_and_elems_expr =
-                    |elem_tys: PrimeType,
-                     get_elem_expr: fn(&PrimeType) -> syn::Expr,
-                     make_accessor: fn(usize) -> syn::Expr,
-                     make_container: fn(Elements) -> syn::Expr| {
-                        let (tmp_elems, elems): (Elements, Elements) = elem_tys
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .map(|(i, elem_ty)| (get_elem_expr(elem_ty), make_accessor(i)))
-                            .unzip();
-                        // let tmp = (#get_elem_block, #get_elem_block, ...);
-                        let tmp_local = syn::Local {
-                            attrs: Vec::new(),
-                            let_token,
-                            pat: syn::PatIdent {
-                                attrs: Vec::new(),
-                                by_ref: None,
-                                mutability: None,
-                                ident: tmp_ident,
-                                subpat: None,
-                            }
-                            .into(),
-                            init: Some(syn::LocalInit {
-                                eq_token,
-                                expr: Box::new(make_container(tmp_elems)),
-                                diverge: None,
-                            }),
-                            semi_token,
-                        };
-                        let elems_expr = make_container(elems);
-
-                        (tmp_local, elems_expr)
-                    };
-
-                match self {
-                    Self::Prime(_) => std::hint::unreachable_unchecked(),
-                    Self::Tuple(elem_tys) => {
-                        let (tmp_local, elems_expr) = make_tmp_local_and_elems_expr(
-                            elem_tys,
-                            // #get_elem_block
-                            |elem_ty| {
-                                syn::ExprBlock {
-                                    attrs: Vec::new(),
-                                    label: None,
-                                    block: get_elem_block(elem_ty),
-                                }
-                                .into()
-                            },
-                            |i| {
-                                // tmp.#i
-                                syn::ExprField {
-                                    attrs: Vec::new(),
-                                    base: Box::new(
-                                        syn::ExprPath {
-                                            attrs: Vec::new(),
-                                            qself: None,
-                                            path: tmp_ident.into(),
-                                        }
-                                        .into(),
-                                    ),
-                                    dot_token,
-                                    member: syn::Member::Unnamed(i.into()),
-                                }
-                                .into()
-                            },
-                            |elems| syn::ExprTuple { attrs: Vec::new(), paren_token, elems }.into(),
-                        );
-
-                        syn::ExprBlock {
-                            attrs: Vec::new(),
-                            label: None,
-                            block: syn::Block {
-                                brace_token,
-                                stmts: vec![
-                                    syn::Stmt::Local(tmp_local),
-                                    syn::Stmt::Expr(elems_expr, None),
-                                ],
-                            },
-                        }
-                        .into()
-                    }
-                    Self::Array { ty: elem_ty, len } => {
-                        // let get_elem = || #get_elem_block;
-                        let get_elem_local = syn::Local {
-                            attrs: Vec::new(),
-                            let_token,
-                            pat: syn::PatIdent {
-                                attrs: Vec::new(),
-                                by_ref: None,
-                                mutability: None,
-                                ident: get_elem_ident,
-                                subpat: None,
-                            }
-                            .into(),
-                            init: Some(syn::LocalInit {
-                                eq_token,
-                                expr: Box::new(
-                                    syn::ExprClosure {
-                                        attrs: Vec::new(),
-                                        lifetimes: None,
-                                        constness: None,
-                                        movability: None,
-                                        asyncness: None,
-                                        capture: None,
-                                        or1_token: or_token,
-                                        inputs: Punctuated::new(),
-                                        or2_token: or_token,
-                                        output: syn::ReturnType::Default,
-                                        body: Box::new(
-                                            syn::ExprBlock {
-                                                attrs: Vec::new(),
-                                                label: None,
-                                                block: get_elem_block(elem_ty),
-                                            }
-                                            .into(),
-                                        ),
-                                    }
-                                    .into(),
-                                ),
-                                diverge: None,
-                            }),
-                            semi_token,
-                        };
-                        let (tmp_local, elems_expr) = make_tmp_local_and_elems_expr(
-                            repeat(elem_ty).take(len),
-                            // get_elem()
-                            |elem_ty| {
-                                syn::ExprCall {
-                                    attrs: Vec::new(),
-                                    func: Box::new(
-                                        syn::ExprPath {
-                                            attrs: Vec::new(),
-                                            qself: None,
-                                            path: get_elem_ident.into(),
-                                        }
-                                        .into(),
-                                    ),
-                                    paren_token,
-                                    args: Punctuated::new(),
-                                }
-                                .into()
-                            },
-                            |i| {
-                                // tmp.#i
-                                syn::ExprIndex {
-                                    attrs: Vec::new(),
-                                    base: Box::new(
-                                        syn::ExprPath {
-                                            attrs: Vec::new(),
-                                            qself: None,
-                                            path: tmp_ident.into(),
-                                        }
-                                        .into(),
-                                    ),
-                                    dot_token,
-                                    member: syn::Member::Unnamed(i.into()),
-                                }
-                                .into()
-                            },
-                            |elems| {
-                                syn::ExprArray { attrs: Vec::new(), bracket_token, elems }.into()
-                            },
-                        );
-
-                        // #get_elem_local
-                        // #tmp_local
-                        // #elems_expr
-                        syn::ExprBlock {
-                            attrs: Vec::new(),
-                            label: None,
-                            block: syn::Block {
-                                brace_token,
-                                stmts: vec![
-                                    syn::Stmt::Local(get_elem_local),
-                                    syn::Stmt::Local(tmp_local),
-                                    syn::Stmt::Expr(elems_expr, None),
-                                ],
-                            },
-                        }
-                        .into()
-                    }
-                }
-            }
-
-            unsafe fn encode_container(
-                &self,
-                repr_width: &Width,
-                value_expr: syn::Expr,
-            ) -> syn::Expr {
-                let span = value_expr.span();
-
-                // Common identifiers.
-                let repr_ident = syn::Ident::new("repr", span);
-                // Common tokens.
-                let brace_token = syn::token::Brace(span);
-                let bracket_token = syn::token::Bracket(span);
-                let dot_dot_token = syn::Token![..](span);
-                let eq_token = syn::Token![=](span);
-                let for_token = syn::Token![for](span);
-                let in_token = syn::Token![in](span);
-                let let_token = syn::Token![let](span);
-                let or_token = syn::Token![|](span);
-                let paren_token = syn::token::Paren(span);
-                let semi_token = syn::Token![;](span);
-
-                // repr
-                let repr_expr: syn::Expr =
-                    syn::ExprPath { attrs: Vec::new(), qself: None, path: repr_ident.into() }
-                        .into();
-                // let repr = 0;
-                let repr_local = syn::Local {
-                    attrs: Vec::new(),
-                    let_token,
-                    pat: syn::PatIdent {
-                        attrs: Vec::new(),
-                        by_ref: None,
-                        mutability: None,
-                        ident: repr_ident,
-                        subpat: None,
-                    }
-                    .into(),
-                    init: Some(syn::LocalInit {
-                        eq_token,
-                        expr: Box::new(
-                            syn::ExprLit {
-                                attrs: Vec::new(),
-                                lit: syn::LitInt::new("0", span).into(),
-                            }
-                            .into(),
-                        ),
-                        diverge: None,
-                    }),
-                    semi_token,
-                };
-                // This closure generates a set of statements that collectively set the next element
-                // in a container type (i.e., tuple or array).
-                let set_elem_stmts = |elem_ty: &PrimeType, elem_expr| {
-                    let make_stmt = |op, right| {
-                        syn::Stmt::Expr(
-                            syn::ExprBinary {
-                                attrs: Vec::new(),
-                                left: Box::new(repr_expr),
-                                op,
-                                right: Box::new(right),
-                            }
-                            .into(),
-                            Some(semi_token),
-                        )
-                    };
-
-                    // repr <<= #elem_width;
-                    // repr |= /* encoded value of #elem_expr */;
-                    [
-                        make_stmt(
-                            syn::BinOp::ShlAssign(syn::Token![<<=](span)),
-                            elem_ty.width().into_grouped_expr().into(),
-                        ),
-                        make_stmt(
-                            syn::BinOp::BitOrAssign(syn::Token![|=](span)),
-                            elem_ty.encode(&repr_width, elem_expr),
-                        ),
-                    ]
-                };
-
-                match self {
-                    Self::Prime(_) => std::hint::unreachable_unchecked(),
-                    Self::Tuple(tys) => {
-                        // #repr_local
-                        // #set_elem_stmts
-                        // #set_elem_stmts
-                        // /* ... */
-                        // #repr_expr
-                        let stmts = once(syn::Stmt::Local(repr_local))
-                            .chain({
-                                tys.iter()
-                                    .enumerate()
-                                    .map(|(i, elem_ty)| {
-                                        // #value_expr.#i
-                                        let elem_expr = syn::ExprField {
-                                            attrs: Vec::new(),
-                                            base: Box::new(value_expr),
-                                            dot_token: syn::Token![.](span),
-                                            member: syn::Member::Unnamed(i.into()),
-                                        }
-                                        .into();
-
-                                        set_elem_stmts(elem_ty, elem_expr)
-                                    })
-                                    .flatten()
-                            })
-                            .chain(once(syn::Stmt::Expr(repr_expr, None)))
-                            .collect();
-
-                        syn::ExprBlock {
-                            attrs: Vec::new(),
-                            label: None,
-                            block: syn::Block { brace_token, stmts },
-                        }
-                        .into()
-                    }
-                    Self::Array { ty: elem_ty, len } => {
-                        let i_ident = syn::Ident::new("i", span);
-                        // #value_expr[i]
-                        let elem_expr = syn::ExprIndex {
-                            attrs: Vec::new(),
-                            expr: Box::new(value_expr),
-                            bracket_token,
-                            index: Box::new(
-                                syn::ExprPath {
-                                    attrs: Vec::new(),
-                                    qself: None,
-                                    path: i_ident.into(),
-                                }
-                                .into(),
-                            ),
-                        }
-                        .into();
-                        // for i in ..#len {
-                        //     #set_elem_stmts
-                        // }
-                        let for_loop = syn::ExprForLoop {
-                            attrs: Vec::new(),
-                            label: None,
-                            for_token,
-                            pat: Box::new(
-                                syn::PatIdent {
-                                    attrs: Vec::new(),
-                                    by_ref: None,
-                                    mutability: None,
-                                    ident: i_ident,
-                                    subpat: None,
-                                }
-                                .into(),
-                            ),
-                            in_token,
-                            expr: Box::new(
-                                syn::ExprRange {
-                                    attrs: Vec::new(),
-                                    start: None,
-                                    limits: syn::RangeLimits::HalfOpen(dot_dot_token),
-                                    end: Some(Box::new(
-                                        syn::ExprLit {
-                                            attrs: Vec::new(),
-                                            lit: syn::LitInt::new(&len.to_string(), span).into(),
-                                        }
-                                        .into(),
-                                    )),
-                                }
-                                .into(),
-                            ),
-                            body: syn::Block {
-                                brace_token,
-                                stmts: set_elem_stmts(elem_ty, elem_expr).into_iter().collect(),
-                            },
-                        }
-                        .into();
-                        let stmts = vec![
-                            syn::Stmt::Local(repr_local),
-                            syn::Stmt::Expr(for_loop, None),
-                            syn::Stmt::Expr(repr_expr, None),
-                        ];
-
-                        syn::ExprBlock {
-                            attrs: Vec::new(),
-                            label: None,
-                            block: syn::Block { brace_token, stmts },
-                        }
-                        .into()
-                    }
-                }
-            }
-        }
-
-        impl Endec for PrimeType {
-            fn decode(&self, repr_width: &Width, repr_expr: syn::Expr) -> syn::Expr {
-                let span = repr_expr.span();
-                let inner = syn::ExprBinary {
-                    attrs: Vec::new(),
-                    left: Box::new(repr_expr),
-                    op: syn::BinOp::BitAnd(syn::Token![&](span)),
-                    right: Box::new(repr_width.into_mask()),
-                }
-                .into();
-
-                match self {
-                    // #inner == 1
-                    Self::Bool => syn::ExprBinary {
-                        attrs: Vec::new(),
-                        left: Box::new(inner),
-                        op: syn::BinOp::Eq(syn::Token![==](span)),
-                        right: Box::new(
-                            syn::ExprLit {
-                                attrs: Vec::new(),
-                                lit: syn::LitInt::new("1", span).into(),
-                            }
-                            .into(),
-                        ),
-                    }
-                    .into(),
-                    // #inner as _
-                    Self::UInt(_) => syn::ExprCast {
-                        attrs: Vec::new(),
-                        expr: Box::new(inner),
-                        as_token: syn::Token![as](span),
-                        ty: Box::new(
-                            syn::TypeInfer { underscore_token: syn::Token![_](span) }.into(),
-                        ),
-                    }
-                    .into(),
-                    // unsafe { ::regent::Bitwise::from_repr_unchecked(#inner) }
-                    Self::Other(_) => syn::ExprUnsafe {
-                        attrs: Vec::new(),
-                        unsafe_token: syn::Token![unsafe](span),
-                        block: syn::Block {
-                            brace_token: syn::token::Brace(span),
-                            stmts: vec![syn::Stmt::Expr(
-                                syn::ExprCall {
-                                    attrs: Vec::new(),
-                                    func: Box::new(
-                                        syn::ExprPath {
-                                            attrs: Vec::new(),
-                                            qself: None,
-                                            path: syn::Path {
-                                                leading_colon: Some(syn::Token![::](span)),
-                                                segments: [
-                                                    "regent",
-                                                    "Bitwise",
-                                                    "from_repr_unchecked",
-                                                ]
-                                                .into_iter()
-                                                .collect(),
-                                            },
-                                        }
-                                        .into(),
-                                    ),
-                                    paren_token: syn::token::Paren(span),
-                                    args: [inner].into_iter().collect(),
-                                }
-                                .into(),
-                                None,
-                            )],
-                        },
-                    },
-                }
-            }
-
-            fn encode(&self, repr_width: &Width, value_expr: syn::Expr) -> syn::Expr {
-                let span = value_expr.span();
-
-                syn::ExprBinary {
-                    attrs: Vec::new(),
-                    left: Box::new(match self {
-                        // ::regent::Bitwise::to_repr(#value_expr)
-                        Self::Other(_) => syn::ExprCall {
-                            attrs: Vec::new(),
-                            func: Box::new(
-                                syn::ExprPath {
-                                    attrs: Vec::new(),
-                                    qself: None,
-                                    path: syn::Path {
-                                        leading_colon: Some(syn::Token![::](span)),
-                                        segments: ["regent", "Bitwise", "to_repr"]
-                                            .into_iter()
-                                            .collect(),
-                                    },
-                                }
-                                .into(),
-                            ),
-                            paren_token: syn::token::Paren(span),
-                            args: [value_expr].into_iter().collect(),
-                        }
-                        .into(),
-                        // #value_expr as ItemRepr
-                        _ => syn::ExprCast {
-                            attrs: Vec::new(),
-                            expr: Box::new(value_expr),
-                            as_token: syn::Token![as](span),
-                            ty: Box::new(
-                                syn::ExprPath::from(syn::Ident::new("ItemRepr", span)).into(),
-                            ),
-                        }
-                        .into(),
-                    }),
-                    op: syn::BinOp::BitAnd(syn::Token![&](span)),
-                    right: repr_width.into_mask(),
-                }
-                .into()
-            }
-        }
-
-        let field_span = field.span();
-        let syn::Field {
-            attrs: field_attrs, ident: field_ident, ty: field_ty, vis: field_vis, ..
-        } = field;
-
-        let (field_getter_ident, field_setter_ident) = match field_ident {
-            Some(it) => (it.clone(), syn::Ident::new(&format!("set_{it}"), it.span())),
-            None => (
-                syn::Ident::new(&format!("_{i}"), item_span),
-                syn::Ident::new(&format!("set_{i}"), item_span),
-            ),
-        };
-        let field_ident = &field_getter_ident;
-
-        let field_ty = unwrap!(Type::parse(field_span, field_ty).map_err(TokenStream::from));
-        unwrap!(field_ty.validate(field_span).map_err(TokenStream::from));
-
-        // This is the position of the least-significant bit of this field.
-        let field_offset = item_width.clone();
-        // This is the exact width of this field.
-        let field_width = field_ty.width();
-        item_width += &field_width;
-
-        // This is a type used to represent this field in arguments and return types.
-        let field_ty = field_ty.as_rust_primitives();
-        if !field_ty.exists() {
-            return err!(
-                field_span;
-                "'bitwise' field cannot be represented in terms of primitive Rust types"
-            )
-            .into();
-        }
-
-        let mut field_value = None;
-        for attr in field_attrs {
-            // FIXME: don't unwrap.
-            let metas = darling::util::parse_attribute_to_meta_list(&attr).unwrap();
-            if metas.path.is_ident("constant") {
-                #[derive(darling::FromMeta)]
-                struct ConstantArgs {
-                    value: Option<syn::Expr>,
-                }
-
-                let nested_metas: Vec<_> = metas.nested.into_iter().collect();
-                // FIXME: don't unwrap.
-                let args = ConstantArgs::from_list(&nested_metas).unwrap();
-                field_value = Some(match args.value {
-                    Some(it) => it.into_token_stream(),
-                    None => quote!(<#field_ty as ::core::default::Default>::default()),
-                });
+    /// Parses comma-separated attribute arguments from the given [`TokenStream`].
+    ///
+    /// This is an implementation detail of [`parse`](Self::parse).
+    fn parse_impl(&mut self, args: TokenStream) -> TokenStream {
+        let parser = syn::meta::parser(|meta| {
+            let ident = meta.path.get_ident().ok_or_else(|| -> syn::Error {
+                err!(meta.path.span(); "attribute argument should be an identifier").into()
+            })?;
+            let arg = if ident == "size" {
+                &mut self.size
+            } else if ident == "width" {
+                &mut self.width
             } else {
-                return err!(field_span; "invalid attribute").into();
+                return Err(err!(ident.span(); "attribute argument is not supported").into());
+            };
+            if arg.is_some() {
+                // TODO: warn against duplicate arguments
             }
-        }
+            let value = meta.value().and_then(|it| it.parse::<syn::LitInt>()).and_then(|it| it.base10_parse())?;
+            *arg = Some(value);
 
-        let new_glue: TokenStream2;
-        if let Some(field_value) = field_value {
-            // This is the simple case for constant fields only. We don't need to generate getters
-            // or setters.
-
-            let field_decoded = field_ty.decode(quote!(repr), &field_width);
-            from_repr_checked_body.extend(quote!({
-                let repr: ItemRepr = repr >> (#field_offset);
-                let actual_value: #field_ty = #field_decoded;
-                let expected_value: #field_ty = #field_value;
-                if actual_value != expected_value {
-                    return None;
-                }
-            }));
-            new_glue = field_ty.encode(field_value, &field_width);
-        } else {
-            // This is the more complicated case for non-constant fields.
-
-            let field_decoded = field_ty.decode(quote!(field_as_repr), &field_width);
-            let field_encoded = field_ty.encode(quote!(field), &field_width);
-            new_glue = field_ty.encode(field_ident.to_token_stream(), &field_width);
-
-            item_methods.push(Method {
-                sig: quote!(#field_vis fn #field_getter_ident(&self) -> #field_ty),
-                body: quote! {
-                    let mut field_as_repr: ItemRepr = self.0 >> (#field_offset);
-
-                    #field_decoded
-                },
-            });
-            item_methods.push(Method {
-                sig: quote!(#field_vis fn #field_setter_ident(&mut self, field: #field_ty)),
-                body: quote! {
-                    let mut field_as_repr: ItemRepr = #field_encoded;
-                    self.0 &= !((!0 >> (ITEM_REPR_WIDTH - (#field_width))) << (#field_offset));
-                    self.0 |= field_as_repr << (#field_offset);
-                },
-            });
-            item_new_args.push(quote!(#field_ident: #field_ty));
-        }
-        new_stmts.push(quote! {
-            bits <<= #field_width;
-            bits |= #new_glue;
+            Ok(())
         });
+        syn::parse_macro_input!(args with parser);
+
+        Default::default()
     }
 
-    let mut prelude = TokenStream2::new();
-    assert_expected_width_is_correct!(expected_width, item_span, item_width, prelude);
-    let item_repr =
-        unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
-
-    new_stmts.reverse();
-    item_methods.push(Method {
-        sig: quote!(#item_vis fn new(#(#item_new_args),*) -> Self),
-        body: quote! {
-            let mut bits: ItemRepr = 0;
-            #(#new_stmts)*
-
-            Self(bits)
-        },
-    });
-
-    let mut output = Item {
-        attrs: quote! {
-            #(#item_attrs)*
-            #[repr(transparent)]
-        },
-        vis: item_vis,
-        token: quote!(struct),
-        ident: item_ident,
-        body: quote! { (#item_repr); },
-        methods: item_methods,
-        bitwise_impl: BitwiseImpl {
-            width: item_width,
-            repr: item_repr,
-            from_repr_unchecked: quote!(Self(repr)),
-            from_repr_checked: quote! {
-                #from_repr_checked_body
-
-                Some(Self(repr))
-            },
-            to_repr: quote!(self.0),
-        },
+    fn expected_width(&self) -> Option<usize> {
+        self.width.or_else(|| self.size.map(|it| it * 8))
     }
-    .into_token_stream();
-    output.extend(prelude);
-
-    output.into()
 }
 
 ///// PRIVATE API //////////////////////////////////////////////////////////////////////////////////
@@ -1264,9 +436,6 @@ struct BitwiseImpl {
     to_repr: TokenStream2,
 }
 
-/// The bit-width of a type known to [`bitwise`].
-type Width = ConstUsizeExpr;
-
 /// A const expression that evaluates to a `usize` at compile-time.
 #[derive(Clone)]
 enum ConstUsizeExpr {
@@ -1441,178 +610,6 @@ impl std::iter::Sum for ConstUsizeExpr {
         }
 
         acc
-    }
-}
-
-/// The type of a struct field.
-#[derive(Clone)]
-enum Type {
-    /// A [prime type](PrimeType).
-    Prime(PrimeType),
-    /// A tuple of [prime types](PrimeType).
-    Tuple(Vec<PrimeType>),
-    /// An array of [prime types](PrimeType).
-    Array {
-        /// The element type.
-        ty: PrimeType,
-        /// The number of elements.
-        len: usize,
-    },
-}
-
-impl Type {
-    fn parse(span: Span2, ty: syn::Type) -> Result<Self, Error> {
-        match ty {
-            syn::Type::Path(ty) => PrimeType::parse(span, ty).map(Self::Prime),
-            syn::Type::Tuple(syn::TypeTuple { elems: tys, .. }) => {
-                let tys = tys
-                    .into_iter()
-                    .map(|ty| {
-                        if let syn::Type::Path(ty) = ty {
-                            PrimeType::parse(span, ty)
-                        } else {
-                            Err(err!(span; "tuple element type must be a path"))
-                        }
-                    })
-                    .collect::<Result<Vec<PrimeType>, _>>()?;
-
-                Ok(Self::Tuple(tys))
-            }
-            syn::Type::Array(syn::TypeArray { elem: ty, len, .. }) => {
-                let syn::Type::Path(ty) = *ty else {
-                    return Err(err!(span; "array element type must be a path"));
-                };
-                let ty = PrimeType::parse(span, ty)?;
-                let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(len), .. }) = len else {
-                    return Err(err!(span; "array length must be an integer literal"));
-                };
-                let len =
-                    len.base10_parse().map_err(|e| TokenStream::from(e.into_compile_error()))?;
-
-                Ok(Self::Array { ty, len })
-            }
-            _ => Err(err!(span; "unsupported type")),
-        }
-    }
-
-    fn as_rust_primitives(self) -> Self {
-        match self {
-            Self::Prime(ty) => Self::Prime(ty.as_rust_primitive()),
-            Self::Tuple(tys) => {
-                Self::Tuple(tys.into_iter().map(|it| it.as_rust_primitive()).collect())
-            }
-            Self::Array { ty, len } => Self::Array { ty: ty.as_rust_primitive(), len },
-        }
-    }
-
-    fn exists(&self) -> bool {
-        match self {
-            Self::Prime(ty) => ty.exists(),
-            Self::Tuple(tys) => tys.iter().all(PrimeType::exists),
-            Self::Array { ty, .. } => ty.exists(),
-        }
-    }
-
-    fn width(&self) -> Width {
-        match self {
-            Self::Prime(ty) => ty.width(),
-            Self::Tuple(tys) => tys.iter().map(PrimeType::width).sum(),
-            Self::Array { ty, len } => ty.width() * Width::Lit(*len),
-        }
-    }
-
-    fn validate(&self, span: Span2) -> Result<(), Error> {
-        match self {
-            Type::Tuple(tys) => {
-                if tys.is_empty() {
-                    return Err(err!(span; "'bitwise' fields cannot be the unit type"));
-                }
-            }
-            Type::Array { len, .. } => {
-                if *len == 0 {
-                    return Err(err!(span; "'bitwise' fields cannot be zero-sized arrays"));
-                }
-            }
-            _ => {}
-        }
-
-        Ok(())
-    }
-}
-
-impl ToTokens for Type {
-    fn to_tokens(&self, tokens: &mut TokenStream2) {
-        match self {
-            Self::Prime(ty) => {
-                ty.to_tokens(tokens);
-            }
-            Self::Tuple(tys) => {
-                tokens.extend(quote! { ( #(#tys),* ) });
-            }
-            Self::Array { ty, len } => {
-                tokens.extend(quote! { [#ty; #len] });
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-enum PrimeType {
-    Bool,
-    UInt(UIntType),
-    Other(syn::TypePath),
-}
-
-impl PrimeType {
-    fn parse(span: Span2, ty: syn::TypePath) -> Result<Self, TokenStream> {
-        if let Some(ty) = ty.path.get_ident().map(ToString::to_string) {
-            if ty == "bool" {
-                return Ok(Self::Bool);
-            } else if let Some(result) = UIntType::parse(span, &ty) {
-                return result.map(Self::UInt);
-            }
-        }
-
-        Ok(Self::Other(ty))
-    }
-
-    fn as_rust_primitive(self) -> Self {
-        if let Self::UInt(ty) = self {
-            Self::UInt(ty.round_up())
-        } else {
-            self
-        }
-    }
-
-    fn exists(&self) -> bool {
-        match self {
-            Self::UInt(ty) => ty.exists(),
-            _ => true,
-        }
-    }
-
-    fn width(&self) -> Width {
-        match self {
-            Self::Bool => Width::Lit(1),
-            Self::UInt(ty) => Width::Lit(ty.width),
-            Self::Other(ty) => Width::Expr(quote!(<#ty as ::regent::Bitwise>::WIDTH)),
-        }
-    }
-}
-
-impl ToTokens for PrimeType {
-    fn to_tokens(&self, tokens: &mut TokenStream2) {
-        match self {
-            Self::Bool => {
-                tokens.extend(quote!(bool));
-            }
-            Self::UInt(ty) => {
-                ty.to_tokens(tokens);
-            }
-            Self::Other(ty) => {
-                ty.to_tokens(tokens);
-            }
-        }
     }
 }
 

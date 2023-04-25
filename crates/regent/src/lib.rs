@@ -8,7 +8,7 @@ pub trait Bitwise: Sized {
     /// The 'exact' bit-width of this type.
     ///
     /// For structs, this is the sum of the widths of all constituent fields. For enums, this is the
-    /// width of the largest variant.
+    /// minimum width necessary to encode all possible variants.
     const WIDTH: usize;
 
     /// The unsigned integer primitive that represents this type in-memory.
