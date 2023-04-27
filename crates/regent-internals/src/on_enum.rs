@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! [`bitwise`](crate::bitwise) for enums.
+
 use proc_macro::TokenStream;
 use syn::spanned::Spanned as _;
 
-/// [`bitwise`] for enums.
-pub fn bitwise_on_enum(expected_width: Option<usize>, item: syn::ItemEnum) -> TokenStream {
-    crate::check_generics(item.generics);
+use crate::{ConstUsizeExpr, Error, Output};
+
+/// [`bitwise`](crate::bitwise) for enums.
+pub fn bitwise(expected_width: Option<usize>, item: syn::ItemEnum) -> Result<Output, Error> {
+    crate::check_generics(item.generics)?;
     let item_span = item.span();
     let syn::ItemEnum {
         attrs: mut item_attrs,
-        generics: item_generics,
         ident: item_ident,
         enum_token: item_enum,
         variants: item_variants,
@@ -20,12 +23,10 @@ pub fn bitwise_on_enum(expected_width: Option<usize>, item: syn::ItemEnum) -> To
     let mut from_repr_checked_arms = Vec::new();
     let mut next_discrim = Width::Lit(0);
     for variant in item_variants.iter() {
+        check_variant_fields(variant.fields)?;
+
         let variant_ident = &variant.ident;
         let variant_span = variant_ident.span();
-
-        if !variant.fields.is_empty() {
-            fail!(variant_span, "variant fields are not supported");
-        }
 
         let variant_discrim = if let Some((_, discrim)) = &variant.discriminant {
             Width::Expr(discrim.clone())
@@ -92,4 +93,12 @@ pub fn bitwise_on_enum(expected_width: Option<usize>, item: syn::ItemEnum) -> To
     output.extend(prelude);
 
     output.into()
+}
+
+fn check_variant_fields(fields: syn::Fields) -> Result<(), Error> {
+    if fields.is_empty() {
+        return Err(err!(fields.span(); "variant fields are not supported"));
+    }
+
+    Ok(())
 }

@@ -1,36 +1,27 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! [`bitwise`](crate::bitwise) for structs.
+
 use std::iter::{once, repeat};
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span as Span2, TokenStream as TokenStream2};
 use syn::{punctuated::Punctuated, spanned::Spanned as _};
 
-use crate::{EnforceItemWidthStrategy, Error, UIntType};
-
-/// The bit-width of a type known to [`bitwise`].
-type Width = crate::ConstUsizeExpr;
+use crate::{EnforceItemWidthStrategy, Error, Output, UIntType, Width};
 
 /// [`bitwise`](crate::bitwise) for structs.
-pub fn bitwise(expected_width: Option<usize>, item: syn::ItemStruct) -> TokenStream {
-    crate::check_generics(item.generics);
+pub fn bitwise(expected_width: Option<usize>, item: syn::ItemStruct) -> Result<Output, Error> {
+    crate::check_generics(item.generics)?;
     let item_span = item.span();
-    let syn::ItemStruct {
-        attrs: mut item_attrs,
-        fields: item_fields,
-        ident: item_ident,
-        struct_token: item_struct,
-        vis: item_vis,
-        ..
-    } = item;
 
     // These next few variables are default-initialized for now and will be continuously updated
     // during field processing.
 
     // This is the total bit-width of all fields.
     let mut item_width = Width::zero(item_span);
-    // This is the list of `impl #item_ident` methods we emit.
-    let mut item_methods = Vec::new();
+    // This is the list of methods we emit.
+    let mut item_fn_blocks = Vec::new();
     // This is the list of all arguments accepted by `#item_ident::new`.
     let mut item_new_args = Vec::new();
     // This is a list of 'snippets' (or series of statements) that initialize the fields in
@@ -40,13 +31,10 @@ pub fn bitwise(expected_width: Option<usize>, item: syn::ItemStruct) -> TokenStr
     let mut from_repr_checked_body = TokenStream2::new();
 
     // Process fields.
-    for (i, field) in item_fields.into_iter().enumerate() {
+    for (i, field) in item.fields.into_iter().enumerate() {
         let field_span = field.span();
-        let syn::Field {
-            attrs: field_attrs, ident: field_ident, ty: field_ty, vis: field_vis, ..
-        } = field;
 
-        let (field_getter_ident, field_setter_ident) = match field_ident {
+        let (field_getter_ident, field_setter_ident) = match field.ident {
             Some(it) => (it.clone(), syn::Ident::new(&format!("set_{it}"), it.span())),
             None => (
                 syn::Ident::new(&format!("_{i}"), item_span),
@@ -55,48 +43,28 @@ pub fn bitwise(expected_width: Option<usize>, item: syn::ItemStruct) -> TokenStr
         };
         let field_ident = &field_getter_ident;
 
-        let field_ty = unwrap!(Type::parse(field_span, field_ty).map_err(TokenStream::from));
-        unwrap!(field_ty.validate(field_span).map_err(TokenStream::from));
+        let field_ty = Type::parse(field_span, field.ty)?;
+        field_ty.validate(field_span)?;
 
         // This is the position of the least-significant bit of this field.
         let field_offset = item_width.clone();
         // This is the exact width of this field.
         let field_width = field_ty.width();
-        item_width += &field_width;
+        item_width.add(&field_width);
 
         let field_ty = field_ty.as_rust_primitives();
         if !field_ty.exists() {
-            return err!(
+            return Err(err!(
                 field_span;
                 "'bitwise' field cannot be represented in terms of primitive Rust types"
-            )
-            .into();
+            ));
         }
 
         let mut field_value = None;
-        for attr in field_attrs {
-            // FIXME: don't unwrap.
-            let metas = darling::util::parse_attribute_to_meta_list(&attr).unwrap();
-            if metas.path.is_ident("constant") {
-                #[derive(darling::FromMeta)]
-                struct ConstantArgs {
-                    value: Option<syn::Expr>,
-                }
-
-                let nested_metas: Vec<_> = metas.nested.into_iter().collect();
-                // FIXME: don't unwrap.
-                let args = ConstantArgs::from_list(&nested_metas).unwrap();
-                field_value = Some(match args.value {
-                    Some(it) => it.into_token_stream(),
-                    None => quote!(<#field_ty as ::core::default::Default>::default()),
-                });
-            } else {
-                return err!(field_span; "invalid attribute").into();
-            }
-        }
+        let field_args = FieldArgs::parse(field_span, &mut field.attrs)?;
 
         let new_glue: syn::Expr;
-        if let Some(field_value) = field_value {
+        if let Some(field_value) = field_args.constant {
             // This is the simple case for constant fields only. We don't need to generate getters
             // or setters.
 
@@ -315,7 +283,7 @@ impl Type {
                             attrs: Vec::new(),
                             left: Box::new(repr_expr),
                             op: syn::BinOp::ShrAssign(syn::Token![>>=](span)),
-                            right: Box::new(elem_width.into_grouped_expr().into()),
+                            right: Box::new(elem_width.into_expr().into()),
                         }
                         .into(),
                         Some(semi_token),
@@ -597,7 +565,7 @@ impl Type {
             [
                 make_stmt(
                     syn::BinOp::ShlAssign(syn::Token![<<=](span)),
-                    elem_ty.width().into_grouped_expr().into(),
+                    elem_ty.width().into_expr().into(),
                 ),
                 make_stmt(
                     syn::BinOp::BitOrAssign(syn::Token![|=](span)),
@@ -833,6 +801,65 @@ impl Endec for PrimeType {
     }
 }
 
+#[derive(Default)]
+struct FieldArgs {
+    constant: Option<syn::Expr>,
+}
+
+impl FieldArgs {
+    fn parse(span: Span2, attrs: &mut Vec<syn::Attribute>) -> Result<Self, Error> {
+        let mut result = Self::default();
+
+        let as_token = syn::Token![as](span);
+        let gt_token = syn::Token![>](span);
+        let lt_token = syn::Token![<](span);
+        let paren_token = syn::token::Paren(span);
+        let path_sep_token = syn::Token![::](span);
+        let underscore_token = syn::Token![_](span);
+
+        attrs.retain(|attr| match attr.meta {
+            syn::Meta::Path(path) if path.is_ident("constant") => {
+                let fn_qself = syn::QSelf {
+                    lt_token,
+                    ty: Box::new(syn::TypeInfer { underscore_token }.into()),
+                    position: 3,
+                    as_token: Some(as_token),
+                    gt_token,
+                };
+                let fn_path = syn::Path {
+                    leading_colon: Some(path_sep_token),
+                    segments: ["core", "default", "Default", "default"]
+                        .into_iter()
+                        .collect(),
+                };
+
+                result.constant = Some(syn::ExprCall {
+                    attrs: Vec::new(),
+                    func: Box::new(syn::ExprPath {
+                        attrs: Vec::new(),
+                        qself: Some(fn_qself),
+                        path: fn_path,
+                    }
+                    .into()),
+                    paren_token,
+                    args: Default::default(),
+                }
+                .into());
+
+                true
+            }
+            syn::Meta::NameValue(pair) if pair.path.is_ident("constant") => {
+                result.constant = Some(pair.value);
+
+                true
+            }
+            _ => false,
+        });
+
+        Ok(result)
+    }
+}
+
 /// The type of a struct field.
 #[derive(Clone)]
 enum Type {
@@ -966,10 +993,9 @@ impl PrimeType {
     }
 
     fn as_rust_primitive(self) -> Self {
-        if let Self::UInt(ty) = self {
-            Self::UInt(ty.round_up())
-        } else {
-            self
+        match self {
+            Self::UInt(ty) => Self::UInt(ty.round_up()),
+            _ => self,
         }
     }
 

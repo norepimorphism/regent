@@ -18,7 +18,7 @@ regent = "0.2"
 ## Example
 
 <details>
-<summary>The fastest way to understand how Regent works is by example.</summary>
+<summary>The fastest way to understand how Regent works.</summary>
 <br>
 
 This struct definition:
@@ -111,7 +111,7 @@ impl regent::BitwiseExt for Ipv4Header0 {
 ## Motivation
 
 <details>
-<summary>A story of Rust, C, and bitfields.</summary>
+<summary>A story about Rust, C, and bitfields.</summary>
 <br>
 
 ### What is Rust?
@@ -122,9 +122,17 @@ Rust is a modern systems programming language with an emphasis on performance an
 
 For all of the things Rust has, *bitfields* it has not. Roughly speaking, a bitfield is a struct field whose width is measured in bits rather than bytes. Structs comprised of bitfields are tightly-packed, making them convenient for representing dense structures like CPU registers and network packets.
 
-Bitfields as a data structure were in part popularized by their inclusion in the C programming language. Unfortunately, the C standard has not given a fair treatment of bitfields, and their troubled specification stifles further adoption of the bitfield as a language construct. Rust wisely avoided introducing such a controversial feature into the language, leaving their implementation to third-party libraries called *crates*.
+Bitfields as a data structure were in part popularized by their inclusion in the C programming language. Unfortunately, the C standard does not give a fair treatment of bitfields, and their troubled specification has stifled further adoption of the bitfield as a language construct. Rust avoided codifying such a controversial feature into the language, leaving the implementation to third-party libraries called *crates*.
 
-Regent is one such crate, and its mission is to facilitate the generation of structs comprised of bitfields while inflicting the least amount of pain upon the programmer. Let's take a stroll through Regent's influences, beginning with C.
+Regent is one of these crates. Its mission is to facilitate the generation of structs comprised of bitfields while inflicting the least amount of pain upon the programmer. In the next section, [*Prior Art*](#prior-art), we take a look at Regent's influences, from C bitfields to the state of Rust bitfield crates today.
+
+</details>
+
+## Prior Art
+
+<details>
+<summary>A review of existing bitfield implementations.</summary>
+<br>
 
 ### Bitfields in C
 
@@ -140,28 +148,21 @@ struct ipv4_header_0 {
 };
 ```
 
-I think this is a good syntax, for several reasons:
+This syntax is *friendly*:
 
-- It is very similar to that of regular struct fields, with the only difference being the `:`&nbsp;`width` suffix. This accents the conceptual similarity between bitfields and regular struct fields, and as a practical matter, it flattens the learning curve of the new syntax.
-- It plays into the programmer's intuitions. "Hidden information" such as the position and order of bitfields is encoded in the position and order of the bitfield declarations themselves.
+- It is very similar to that of regular struct fields, with the only difference being the <code>:&nbsp;width</code> suffix. This syntactical similarity complements the conceptual similarity between bitfields and regular struct fields, and as a practical matter, it flattens the learning curve of the new syntax.
+- It plays into the programmer's intuitions. "Hidden information" such as the position and order of bitfields is *encoded* in the position and order of the bitfield declarations themselves.
 
-And you would be forgiven for assuming a good syntax begets a good feature. But, many important properties of C bitfields are implementation-defined, undefined, or unspecified, rendering them unportable at best and dangerous at worst.
+And you would be forgiven for assuming a good syntax begets a good feature. Unfortunately, many important properties of C bitfields are implementation-defined, undefined, or unspecified, rendering them non-portable at best and dangerous at worst. To name a few:
 
-For example, correspondence between the order of bitfield declarations and the order of the actual bitfields is not necessarily guaranteed. Adjacent bitfield declarations will probably correspond to adjacent bitfields, but whether the first bitfield declaration is most- or least-significant is implementation-defined.
-
-There is similarly no straightforward way to specify the backing storage, or internal representation, of a struct comprised of bitfields, nor is there any way to guarantee at compile-time that such a struct is of a particular width or size.
-
-</details>
-
-## Prior Art
-
-<details>
-<summary>A review of existing Rust crates with similar goals.</summary>
-<br>
+- The claim that bitfields are ordered according to their declarations is only partly true. C structs are divided into one or more *allocation units*, and the order of bitfields inside an allocation unit is implementation-defined. If, and only if, this order is in the same direction as that of the units themselves, will the order of bitfields correspond to the order of bitfield declarations.
+- It is implementation-defined as to whether bitfields may straddle (cross) unit boundaries. If not, padding will be inserted, making the struct no longer tightly-packed.
+- The alignment of allocation units is unspecified. This is important if bitfields can straddle unit boundaries, in which case it determines how much padding is inserted.
+- It is impossible to specify the backing storage, or internal representation, of a struct comprised of bitfields, nor is there any way to guarantee at compile-time that such a struct is of a particular width or size.
 
 ### The *bitfield* Crate
 
-The aptly-named [*bitfield*](https://crates.io/crates/bitfield) by Loïc Damien ([@dzamlo](https://github.com/dzamlo)) provides the function-like macro `bitfield`. The `ipv4_header_0` struct from earlier can be expressed like this:
+[*bitfield*](https://crates.io/crates/bitfield) by Loïc Damien ([@dzamlo](https://github.com/dzamlo)) was one of the first crates to port bitfields to Rust and originally bore a strong resemblance to C bitfield syntax. It provides the function-like macro `bitfield`. The `ipv4_header_0` struct from C can be expressed like this:
 
 ```rust
 bitfield! {
@@ -176,7 +177,7 @@ bitfield! {
 
 On the one hand, this syntax provides a mechanism for specifying which bitfield is most- or least-significant, avoiding the ordering fiasco of C bitfields. Another improvement upon C is the explicit type annotation of the struct itself, which grounds it to a stable internal representation and allows the compiler to guarantee that the sum of bitfield widths does not exceed the width of this representation.
 
-On the other hand, this syntax is neither familiar nor intuitive. It can be inferred that the `3,`&nbsp;`0` and friends on the right-hand side correspond to the range of bits each bitfield inhabits. However, this displaces field type annotations, and these ranges also run counter-intuitive to the idiomatic Rust range syntax `start..end`. Furthermore, the bitfield declarations being at the same level as the struct declaration defies the logical ownership of fields by a struct, which is idiomatically expressed by nesting the fields within a block.
+On the other hand, this syntax is neither familiar nor intuitive. It can be inferred that the `3,`&nbsp;`0` and friends on the right-hand side correspond to the range of bits each bitfield inhabits. However, this displaces field type annotations, and these ranges also run counter-intuitive to the standard Rust range syntax `start..end`. Furthermore, the bitfield declarations being at the same level as the struct declaration is counter-intuitive to the logical ownership of fields by a struct, which Rust expresses by nesting the fields within a block.
 
 In some ways, this `bitfield` macro is more powerful than C bitfields. Most notably, defining a bitfield by its range rather than width allows bitfields to overlap. In overlapping cases, this might be a reasonable syntax. However, I contend that in all non-overlapping cases, this syntax is more verbose and more error-prone than that of C. For example, it is easy to make an off-by-one error when specifying the range of a bitfield and inadvertently overlap adjacent bitfields by one bit:
 
@@ -184,14 +185,14 @@ In some ways, this `bitfield` macro is more powerful than C bitfields. Most nota
     // ...
     pub version, set_version:            3,  0;
     pub ihl, set_ihl:                    7,  3;
-                                         /* ^^^ This is wrong! */
+    // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ^ This is wrong!
     pub dscp, set_dscp:                 13,  8;
     // ...
 ```
 
 ### The *modular-bitfield* Crate
 
-[*modular-bitfield*](https://crates.io/crates/modular-bitfield) is developed by Robin Freyler ([@Robbepop](https://github.com/Robbepop)) and inspired by David Tolnay's ([@dtolnay](https://github.com/dtolnay)) [proc macro workshop](https://github.com/dtolnay/proc-macro-workshop/blob/master/README.md). Its core API is the `bitfield` attribute macro. Let's apply the `ipv4_header_0` test:
+The crate [*modular-bitfield*](https://crates.io/crates/modular-bitfield) is developed by Robin Freyler ([@Robbepop](https://github.com/Robbepop)) and inspired by David Tolnay's ([@dtolnay](https://github.com/dtolnay)) [proc macro workshop](https://github.com/dtolnay/proc-macro-workshop/blob/master/README.md). Its core API is the `bitfield` attribute macro. Let's apply the `ipv4_header_0` test:
 
 ```rust
 use modular_bitfield::prelude::*;

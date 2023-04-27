@@ -12,5 +12,9 @@ license = "MPL-2.0"
 keywords = ["bitfield"]
 categories = ["data-structures", "encoding"]
 
+[features]
+default = []
+nightly = ["regent-internals/nightly"]
+
 [dependencies]
 regent-internals = { path = "../regent-internals", version = "0.2.0" }
