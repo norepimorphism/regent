@@ -25,19 +25,7 @@ fn test_heterogeneous_tuple_field() {
 
 fn test_constant_fields() {
     #[bitwise]
-    struct A(
-        u1,
-        u2,
-        u3,
-        u4,
-        u5,
-        u6,
-        u7,
-        #[constant(value = "144")]
-        u8,
-        #[constant]
-        bool,
-    );
+    struct A(u1, u2, u3, u4, u5, u6, u7, #[constant(value = "144")] u8, #[constant] bool);
 }
 
 fn test_all_item_widths() {

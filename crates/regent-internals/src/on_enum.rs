@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! [`bitwise`](crate::bitwise) for enums.
+//! The `bitwise` macro for enums.
 
-use proc_macro::TokenStream;
-use syn::spanned::Spanned as _;
+use crate::prelude::*;
 
-use crate::{ConstUsizeExpr, Error, Output};
-
-/// [`bitwise`](crate::bitwise) for enums.
+/// The `bitwise` macro for enums.
 pub fn bitwise(expected_width: Option<usize>, item: syn::ItemEnum) -> Result<Output, Error> {
-    crate::check_generics(item.generics)?;
+    check_generics(item.generics)?;
     let item_span = item.span();
     let syn::ItemEnum {
         attrs: mut item_attrs,
@@ -20,7 +17,7 @@ pub fn bitwise(expected_width: Option<usize>, item: syn::ItemEnum) -> Result<Out
         ..
     } = item;
 
-    let mut from_repr_checked_arms = Vec::new();
+    let mut from_repr_checked_arms = vec![];
     let mut next_discrim = Width::Lit(0);
     for variant in item_variants.iter() {
         check_variant_fields(variant.fields)?;
@@ -43,7 +40,7 @@ pub fn bitwise(expected_width: Option<usize>, item: syn::ItemEnum) -> Result<Out
         other => (other.ilog2() + 1) as _,
     });
 
-    let mut const_ctx = Vec::new();
+    let mut const_ctx = vec![];
     enforce_item_width!(expected_width, item_span, item_width, const_ctx);
     let item_repr =
         unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
@@ -69,7 +66,7 @@ pub fn bitwise(expected_width: Option<usize>, item: syn::ItemEnum) -> Result<Out
         token: quote!(enum),
         ident: item_ident,
         body: quote!({ #item_variants }),
-        methods: Vec::new(),
+        methods: vec![],
         bitwise_impl: BitwiseImpl {
             width: item_width,
             repr: item_repr,

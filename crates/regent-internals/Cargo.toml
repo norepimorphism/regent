@@ -5,8 +5,7 @@ name = "regent-internals"
 version = "0.2.0"
 authors = ["norepimorphism <norepi@protonmail.com>"]
 edition = "2021"
-description = "Internal proc macros for the regent crate"
-readme = false
+description = "Proc macro counterpart to the regent crate"
 repository = "https://github.com/norepimorphism/regent"
 license = "MPL-2.0"
 
