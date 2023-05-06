@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Macro evaluation time and compile-time checks.
+//! Checks to be performed at macro evaluation time or compile-time.
 
 use super::*;
 
-/// Returns an [`Error`] if `generics` is non-empty.
+/// Returns an [`Error`] if the given [`syn::Generics`] is non-empty.
 ///
 /// The `bitwise` macro does not support generic items. This function ensures that the current item
 /// is not generic.

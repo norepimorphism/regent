@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Common items for internal use in *regent-internals*.
+
 mod checks;
 mod error;
 mod output;
 mod sum;
-mod syn_utils;
+pub(crate) mod syn_utils;
 mod ty;
 
-pub(crate) use std::iter::{once, repeat};
+pub(crate) use std::iter::once;
 
 pub(crate) use checks::*;
 pub(crate) use error::Error;
@@ -21,5 +23,5 @@ pub(crate) use syn::{
     punctuated::Punctuated,
     spanned::Spanned as _,
 };
-pub(crate) use syn_utils::*;
+pub(crate) use syn_utils as su;
 pub(crate) use ty::*;

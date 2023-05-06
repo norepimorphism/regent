@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! An unsigned integer of arbitrary width: <code>u&#8239;<em>width</em></code>.
+
 use super::*;
 
 /// The internal representation, or backing storage, of an item emitted by *bitwise*.
 pub(crate) type Repr = UIntType;
 
-/// An unsigned integer type recognized by *bitwise*.
+/// An unsigned integer of arbitrary width: <code>u&#8239;<em>width</em></code>.
 #[derive(Clone, Copy)]
 pub(crate) struct UIntType {
     width: usize,
@@ -20,7 +22,7 @@ impl UIntType {
     /// Attempts to parse a `UIntType` from the given string.
     ///
     /// This returns `None` if `ty` is not an unsigned integer (i.e., of the form
-    /// <code>u&nbsp;<em>width</em></code>), `Some(Err(_))` if `ty` *is* an
+    /// <code>u&#8239;<em>width</em></code>), `Some(Err(_))` if `ty` *is* an
     /// unsigned integer but the width suffix fails to parse or is zero, and `Some(Ok(_))`
     /// otherwise.
     pub(crate) fn parse(span: Span2, ty: &str) -> Option<Result<Self, Error>> {
@@ -83,7 +85,7 @@ impl UIntType {
         }
     }
 
-    /// Produces an identifier of the form <code>u&nbsp;<em>width</em></code> with the given span.
+    /// Produces an identifier of the form <code>u&#8239;<em>width</em></code> with the given span.
     pub(crate) fn make_ident(self, span: Span2) -> syn::Ident {
         syn::Ident::new(&format!("u{}", self.width), span)
     }
@@ -117,7 +119,7 @@ fn determine_item_repr(
         let repr = match Repr::parse(span, &ty) {
             Some(Ok(it)) => {
                 if !it.exists() {
-                    return Err(err!(span; "attribute argument cannot be an imaginary type"));
+                    return Err(err!(span; "argument cannot be an imaginary type"));
                 }
 
                 it
@@ -126,7 +128,7 @@ fn determine_item_repr(
                 return Err(e);
             }
             None => {
-                return Err(err!(span; "attribute argument must be an unsigned integer primitive"));
+                return Err(err!(span; "argument must be an unsigned integer primitive"));
             }
         };
         item_attrs.remove(i);

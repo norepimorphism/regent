@@ -1,20 +1,33 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! An inner type in a [tuple] or [array].
+//!
+//! [tuple]: Type::Tuple
+//! [array]: Type::Array
+
 use super::*;
 
+/// An inner type in a [tuple] or [array].
+///
+/// [tuple]: Type::Tuple
+/// [array]: Type::Array
 #[derive(Clone)]
-pub(crate) enum PrimeType {
-    Bool,
-    UInt(UIntType),
-    Other(syn::TypePath),
+pub(crate) enum ElemType {
+    /// A boolean: `bool`.
+    Bool(Span2),
+    /// A [`UIntType`].
+    UInt(Span2, UIntType),
+    /// A user-defined type that implements the `Bitwise` trait.
+    ImplBitwise(syn::TypePath),
 }
 
-impl PrimeType {
-    pub(crate) fn width(&self) -> Width {
+impl ElemType {
+    /// The bit-width of this type.
+    pub(crate) fn width(self) -> Width {
         match self {
-            Self::Bool => Width::Lit(1),
-            Self::UInt(ty) => Width::Lit(ty.width),
-            Self::Other(ty) => Width::Expr(quote!(<#ty as ::regent::Bitwise>::WIDTH)),
+            Self::Bool(span) => Width::Met { span, value: 1 },
+            Self::UInt(span, ty) => Width::Met { span, value: ty.width() },
+            Self::ImplBitwise(ty) => Width::Ct(su::expr::make_bitwise_width(ty.span(), ty.into())),
         }
     }
 

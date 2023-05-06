@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Types recognized by the *bitwise* macro.
+//! Types accepted in struct field position.
 
-mod prime;
+mod elem;
 mod uint;
 
-pub(crate) use prime::*;
+pub(crate) use elem::*;
 pub(crate) use uint::*;
 
 use super::*;
@@ -13,14 +13,14 @@ use super::*;
 /// The type of a struct field.
 #[derive(Clone)]
 enum Type {
-    /// A [prime type](PrimeType).
-    Prime(PrimeType),
-    /// A tuple of [prime types](PrimeType).
-    Tuple(Vec<PrimeType>),
-    /// An array of [prime types](PrimeType).
+    /// An [element type](ElemType).
+    Elem(ElemType),
+    /// A tuple of [element types](ElemType).
+    Tuple(Vec<ElemType>),
+    /// An array of [element types](ElemType).
     Array {
         /// The element type.
-        ty: PrimeType,
+        elem: ElemType,
         /// The number of elements.
         len: usize,
     },
@@ -55,7 +55,7 @@ impl Type {
                 let len =
                     len.base10_parse().map_err(|e| TokenStream::from(e.into_compile_error()))?;
 
-                Ok(Self::Array { ty, len })
+                Ok(Self::Array { elem: ty, len })
             }
             _ => Err(err!(span; "unsupported type")),
         }
@@ -67,7 +67,7 @@ impl Type {
             Self::Tuple(tys) => {
                 Self::Tuple(tys.into_iter().map(|it| it.as_rust_primitive()).collect())
             }
-            Self::Array { ty, len } => Self::Array { ty: ty.as_rust_primitive(), len },
+            Self::Array { elem: ty, len } => Self::Array { elem: ty.as_rust_primitive(), len },
         }
     }
 
@@ -75,7 +75,7 @@ impl Type {
         match self {
             Self::Prime(ty) => ty.exists(),
             Self::Tuple(tys) => tys.iter().all(PrimeType::exists),
-            Self::Array { ty, .. } => ty.exists(),
+            Self::Array { elem: ty, .. } => ty.exists(),
         }
     }
 
@@ -83,7 +83,7 @@ impl Type {
         match self {
             Self::Prime(ty) => ty.width(),
             Self::Tuple(tys) => tys.iter().map(PrimeType::width).sum(),
-            Self::Array { ty, len } => ty.width() * Width::Lit(*len),
+            Self::Array { elem: ty, len } => ty.width() * Width::Lit(*len),
         }
     }
 
@@ -115,7 +115,7 @@ impl ToTokens for Type {
             Self::Tuple(tys) => {
                 tokens.extend(quote! { ( #(#tys),* ) });
             }
-            Self::Array { ty, len } => {
+            Self::Array { elem: ty, len } => {
                 tokens.extend(quote! { [#ty; #len] });
             }
         }

@@ -2,8 +2,8 @@
 
 //! Procedural macro implementations for [Regent].
 //!
-//! This crate, *regent-internals*, provides the [`bitwise`] proc macro that is re-exported by the
-//! main *regent* crate. The purpose and usage of `bitwise` are described in [the README there]. Any
+//! This crate provides the [`bitwise`] proc macro that is re-exported by the main *regent* crate.
+//! The purpose and usage of `bitwise` are described in [the README there]. Any
 //! documentation-related issues should be reported to [the GitHub repository]. (Thanks!)
 //!
 //! [Regent]: https://crates.io/crates/regent
@@ -35,9 +35,9 @@ macro_rules! err {
     };
 }
 
-mod on_enum;
-mod on_struct;
+mod r#enum;
 mod prelude;
+mod r#struct;
 
 use prelude::*;
 
@@ -48,8 +48,8 @@ pub fn bitwise(args: TokenStream, item: TokenStream) -> TokenStream {
     let expected_width = args.expected_width();
 
     let result = match syn::parse_macro_input!(item as _) {
-        syn::Item::Enum(item) => on_enum::bitwise(expected_width, item),
-        syn::Item::Struct(item) => on_struct::bitwise(expected_width, item),
+        syn::Item::Struct(item) => r#struct::bitwise(expected_width, item),
+        syn::Item::Enum(item) => r#enum::bitwise(expected_width, item),
         item => Err(err!(item.span(); "item must be a struct or enum").into()),
     };
 
@@ -59,40 +59,43 @@ pub fn bitwise(args: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-///// PRIVATE API //////////////////////////////////////////////////////////////////////////////////
-
-/// Acceptable arguments to the `bitwise` attribute.
+/// Acceptable arguments to the `#[bitwise]` attribute.
 #[derive(Default)]
 struct Args {
     /// The 'size' argument, if any.
     ///
     /// This determines the size, in bytes, of the emitted item. This argument is
-    /// mutually-exclusive with the 'width' argument.
+    /// mutually-exclusive with the '[width]' argument.
+    ///
+    /// [width]: Self::width
     size: Option<usize>,
     /// The 'width' argument, if any.
     ///
     /// This determines the width, in bits, of the emitted item. This argument is
-    /// mutually-exclusive with the 'size' argument.
+    /// mutually-exclusive with the '[size]' argument.
+    ///
+    /// [size]: Self::size
     width: Option<usize>,
 }
 
 impl Args {
-    /// Parses comma-separated attribute arguments from the given [`TokenStream`].
+    /// Parses comma-separated arguments to the `#[bitwise]` attribute from the given
+    /// [`TokenStream`].
     fn parse(args: TokenStream) -> Result<Self, Error> {
-        let mut result = Self::default();
+        let mut output = Self::default();
         syn::meta::parser(|meta| {
             let ident = meta.path.get_ident().ok_or_else(|| -> syn::Error {
-                err!(meta.path.span(); "attribute argument must be an identifier").into()
+                err!(meta.path.span(); "argument path must be an identifier").into()
             })?;
             let arg = if ident == "size" {
-                &mut result.size
+                &mut output.size
             } else if ident == "width" {
-                &mut result.width
+                &mut output.width
             } else {
-                return Err(err!(ident.span(); "attribute argument is not supported").into());
+                return Err(meta.error("argument is not supported"));
             };
             if arg.is_some() {
-                return Err(err!(meta.path.span(); "attribute argument is a duplicate").into());
+                return Err(meta.error("argument is a duplicate"));
             }
             let value = meta
                 .value()
@@ -105,11 +108,11 @@ impl Args {
         .parse(args)
         .map_err(Error::new)?;
 
-        if result.size.is_some() && result.width.is_some() {
-            return Err(err!("`size` and `width` attribute arguments are mutually exclusive"));
+        if output.size.is_some() && output.width.is_some() {
+            return Err(err!("`size` and `width` arguments are mutually exclusive"));
         }
 
-        Ok(result)
+        Ok(output)
     }
 
     /// The expected bit-width, if any, of the emitted item.

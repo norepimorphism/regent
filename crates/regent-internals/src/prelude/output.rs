@@ -47,10 +47,12 @@ impl From<Output> for proc_macro::TokenStream {
 
 impl From<Output> for proc_macro2::TokenStream {
     fn from(output: Output) -> Self {
+        let item_span = output.item.span();
+
         [
             output.item.into_token_stream(),
             output.item_impl.into_token_stream(),
-            output.bitwise_impl.into_item_impl().into_token_stream(),
+            output.bitwise_impl.into_item_impl(item_span).into_token_stream(),
         ]
         .into_iter()
         .collect()
@@ -58,10 +60,7 @@ impl From<Output> for proc_macro2::TokenStream {
 }
 
 impl BitwiseImpl {
-    fn into_item_impl(self) -> syn::ItemImpl {
-        // FIXME: span
-        let span = self.ident.span();
-
+    fn into_item_impl(self, span: Span2) -> syn::ItemImpl {
         let and_token = syn::Token![&](span);
         let brace_token = syn::token::Brace(span);
         let colon_token = syn::Token![:](span);
@@ -80,20 +79,12 @@ impl BitwiseImpl {
         let type_token = syn::Token![type](span);
         let unsafe_token = syn::Token![unsafe](span);
 
-        let trait_path = syn::Path {
-            leading_colon: Some(path_sep_token),
-            segments: ["regent", "Bitwise"]
-                .into_iter()
-                .map(|it| syn::PathSegment::from(syn::Ident::new(it, span)))
-                .collect(),
-        };
-
         let width_item = syn::ImplItemConst {
             attrs: vec![],
             vis: syn::Visibility::Inherited,
             defaultness: None,
             const_token,
-            ident: syn::Ident::new("WIDTH", span),
+            ident: su::ident::WIDTH_ITEM.make_ident(span),
             generics: Default::default(),
             colon_token,
             ty: syn::TypePath { qself: None, path: syn::Ident::new("usize", span).into() }.into(),
@@ -108,7 +99,7 @@ impl BitwiseImpl {
             vis: syn::Visibility::Inherited,
             defaultness: None,
             type_token,
-            ident: syn::Ident::new("Repr", span),
+            ident: su::ident::REPR_ITEM.make_ident(span),
             generics: Default::default(),
             eq_token,
             ty: syn::TypePath { qself: None, path: self.repr.make_ident(span).into() }.into(),
@@ -127,7 +118,7 @@ impl BitwiseImpl {
             unsafety: None,
             impl_token,
             generics: Default::default(),
-            trait_: Some((None, trait_path, for_token)),
+            trait_: Some((None, su::path::make_bitwise(span), for_token)),
             self_ty: Box::new(syn::TypePath { qself: None, path: self.ident.into() }.into()),
             brace_token,
             items,
@@ -151,7 +142,7 @@ impl BitwiseFuncs {
                     mutability: self.is_mutable.then_some(syn::Token![mut](span)),
                     self_token: syn::Token![self](span),
                     colon_token: None,
-                    ty: Box::new(make_self_ty(span)),
+                    ty: Box::new(su::ty::make_self(span)),
                 })
             }
         }
@@ -216,16 +207,16 @@ impl BitwiseFuncs {
                 is_const: false,
                 is_unsafe: true,
                 receiver: None,
-                inputs: |span| vec![make_self_repr_arg(span)],
-                output: |span| Some(make_self_ty(span)),
+                inputs: |span| vec![su::arg::make_self_repr(span)],
+                output: |span| Some(su::ty::make_self(span)),
                 block: from_repr_unchecked,
             },
             make_fn_from_block! {
                 is_const: false,
                 is_unsafe: false,
                 receiver: None,
-                inputs: |span| vec![make_self_repr_arg(span)],
-                output: |span| Some(make_option_self_ty(span)),
+                inputs: |span| vec![su::arg::make_self_repr(span)],
+                output: |span| Some(su::ty::make_option_self(span)),
                 block: from_repr_checked,
             },
             make_fn_from_block! {
@@ -233,7 +224,7 @@ impl BitwiseFuncs {
                 is_unsafe: false,
                 receiver: Some(Receiver { is_borrowed: false, is_mutable: false }),
                 inputs: |_| vec![],
-                output: |span| Some(make_self_repr_ty(span)),
+                output: |span| Some(su::ty::make_self_repr(span)),
                 block: to_repr,
             },
         ]

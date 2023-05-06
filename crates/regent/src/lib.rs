@@ -22,7 +22,7 @@ pub trait Bitwise: Sized {
 }
 
 pub trait BitwiseExt: Bitwise {
-    /// The bit-width of this type in-memory.
+    /// The bit-width of this type in memory.
     ///
     /// This is eight times the size, in bytes, of [`Repr`](Bitwise::Repr).
     const REPR_WIDTH: usize;

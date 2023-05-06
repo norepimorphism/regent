@@ -10,14 +10,14 @@ pub(crate) type Width = Sum;
 /// A sum of unsigned integers that expands to a `usize` expression at compile-time.
 #[derive(Clone)]
 pub(crate) enum Sum {
-    /// An unsigned integer literal whose value is known at macro evaluation time (MET).
+    /// An unsigned integer whose value is known at macro evaluation time (MET).
     Met { span: Span2, value: usize },
     /// A `usize` expression whose value is known only at compile-time (CT).
     Ct(syn::Expr),
 }
 
 impl Sum {
-    /// Creates a sum from a single `0usize` literal.
+    /// Creates a sum of zero with the given span.
     pub(crate) fn zero(span: Span2) -> Self {
         Self::Met { span, value: 0 }
     }
