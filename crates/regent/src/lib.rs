@@ -2,6 +2,8 @@
 
 #![no_std]
 
+pub mod spec;
+
 pub use regent_internals::bitwise;
 
 pub trait Bitwise: Sized {

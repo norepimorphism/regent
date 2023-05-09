@@ -16,7 +16,7 @@ pub(crate) fn check_generics(generics: syn::Generics) -> Result<(), Error> {
         return Err(err!(params.span(); "generics parameters are not supported in this context"));
     }
     if let Some(clause) = where_clause {
-        return Err(err!(clause.span(); "'where clauses' are not supported in this context"));
+        return Err(err!(clause.span(); "`where` clauses are not supported in this context"));
     }
 
     Ok(())
@@ -45,7 +45,7 @@ impl EnforceItemWidthStrategy {
     /// context.
     pub(crate) fn devise(expected_width: usize, actual_width: Width) -> Self {
         match actual_width {
-            Width::Met { span, value: actual_width } => {
+            Width::Met(span, actual_width) => {
                 if expected_width != actual_width {
                     return Self::Fail(err!(
                         span;

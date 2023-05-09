@@ -2,100 +2,141 @@
 
 //! The `bitwise` macro for enums.
 
-use crate::prelude::*;
+use super::*;
 
-/// The `bitwise` macro for enums.
-pub fn bitwise(expected_width: Option<usize>, item: syn::ItemEnum) -> Result<Output, Error> {
-    check_generics(item.generics)?;
-    let item_span = item.span();
-    let syn::ItemEnum {
-        attrs: mut item_attrs,
-        ident: item_ident,
-        enum_token: item_enum,
-        variants: item_variants,
-        vis: item_vis,
-        ..
-    } = item;
+pub(crate) struct Enum;
 
-    let mut from_repr_checked_arms = vec![];
-    let mut next_discrim = Width::Lit(0);
-    for variant in item_variants.iter() {
-        check_variant_fields(variant.fields)?;
+impl Form for Enum {
+    type Item = syn::ItemEnum;
 
-        let variant_ident = &variant.ident;
-        let variant_span = variant_ident.span();
+    fn bitwise(
+        expected_width: Option<usize>,
+        item: Self::Item,
+    ) -> Result<Output<Self::Item>, Error> {
+        check_generics(item.generics)?;
 
-        let variant_discrim = if let Some((_, discrim)) = &variant.discriminant {
-            Width::Expr(discrim.clone())
-        } else {
-            next_discrim.clone()
-        };
-        from_repr_checked_arms.push(quote!(#variant_discrim => Some(Self::#variant_ident)));
-        next_discrim = variant_discrim + Width::Lit(1);
-    }
+        let mut from_repr_checked_arms = vec![];
 
-    let item_width = Width::Lit(match item_variants.len() {
-        1 => 1,
-        other if other.is_power_of_two() => other.ilog2() as _,
-        other => (other.ilog2() + 1) as _,
-    });
+        let max_discrim: Option<usize> = None;
+        for variant in item.variants.iter() {
+            if !variant.fields.is_empty() {
+                return Err(err!(variant.fields.span(); "variant fields are not supported"));
+            }
 
-    let mut const_ctx = vec![];
-    enforce_item_width!(expected_width, item_span, item_width, const_ctx);
-    let item_repr =
-        unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
-    item_attrs.push({
-        let dont_care_span = Span2::call_site();
+            let variant_span = variant.span();
 
-        syn::Attribute {
-            pound_token: syn::Token![#](dont_care_span),
+            let pat;
+            if let Some((_, discrim)) = variant.discriminant {
+                let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(lit ), .. }) = discrim else {
+                    return Err(err!(discrim.span(); "variant discriminant must be an integer literal"));
+                };
+                max_discrim = Some(lit.base10_parse().map_err(Error::new)?);
+                pat = syn::PatLit { attrs: vec![], lit: lit.into() }.into();
+            } else {
+                let discrim = max_discrim.map(|it| it + 1).unwrap_or(0);
+                pat = syn::PatLit {
+                    attrs: vec![],
+                    lit: syn::LitInt::new(&discrim.to_string(), variant_span).into(),
+                }
+                .into();
+                max_discrim = Some(discrim);
+            }
+
+            from_repr_checked_arms.push(syn::Arm {
+                attrs: vec![],
+                pat,
+                guard: None,
+                fat_arrow_token: syn::Token![=>](variant_span),
+                body: Box::new(syn::ExprCall {
+                    attrs: vec![],
+                    func: Box::new(syn::ExprPath {
+                        attrs: vec![],
+                        qself: None,
+                        path: path!(variant_span; :: core option Option Some),
+                    }.into()),
+                    paren_token: syn::token::Paren(variant_span),
+                    args: once(syn::Expr::Path(syn::ExprPath {
+                        attrs: vec![],
+                        qself: None,
+                        path: syn::Path {
+                            leading_colon: None,
+                            segments: [syn::Ident::new("Self", variant_span), variant.ident]
+                                .into_iter()
+                                .map(syn::PathSegment::from)
+                                .collect(),
+                        }
+                    })).collect(),
+                }.into()),
+                comma: Some(syn::Token![,](variant_span)),
+            });
+        }
+
+        let item_span = item.span();
+
+        let max_discrim = max_discrim.ok_or_else(|| err!(item_span; "enum cannot have zero variants"))?;
+        let mut item_width = 1;
+        if max_discrim != 0 {
+            item_width += usize::try_from(max_discrim.ilog2()).unwrap();
+        }
+        let item_width = Width::Met(item_span, item_width);
+
+        let item_repr = uint::RustType::repr_for_item(expected_width, &item_width, &mut item.attrs)?;
+        item.attrs.push(syn::Attribute {
+            pound_token: syn::Token![#](item_span),
             style: syn::AttrStyle::Outer,
-            bracket_token: syn::token::Bracket(dont_care_span),
+            bracket_token: syn::token::Bracket(item_span),
             meta: syn::MetaList {
-                path: syn::Ident::new("repr", dont_care_span).into(),
-                delimiter: syn::MacroDelimiter::Paren(syn::token::Paren(dont_care_span)),
-                tokens: item_repr.into_token_stream(),
+                path: syn::Ident::new("repr", item_span).into(),
+                delimiter: syn::MacroDelimiter::Paren(syn::token::Paren(item_span)),
+                tokens: item_repr.into_syn_type(item_span).into_token_stream(),
             }
             .into(),
-        }
-    });
+        });
 
-    let mut output = Item {
-        attrs: item_attrs,
-        vis: item_vis,
-        token: quote!(enum),
-        ident: item_ident,
-        body: quote!({ #item_variants }),
-        methods: vec![],
-        bitwise_impl: BitwiseImpl {
-            width: item_width,
-            repr: item_repr,
-            from_repr_unchecked: quote! {
-                // FIXME: is there a less 'wildly unsafe' version to this?
-                ::core::mem::transmute(repr)
-            },
-            from_repr_checked: quote! {
-                match repr as usize {
-                    #(#from_repr_checked_arms,)*
-                    _ => None,
+        let mut const_block = None;
+        if let Some(expected_width) = expected_width {
+            match EnforceItemWidthStrategy::devise(expected_width, item_width) {
+                EnforceItemWidthStrategy::None => {},
+                EnforceItemWidthStrategy::Fail(e) => {
+                    return Err(e);
                 }
+                EnforceItemWidthStrategy::ConstCheck(expr) => {
+                    const_block = Some(syn::Block {
+                        brace_token: syn::token::Brace(item_span),
+                        stmts: vec![syn::Stmt::Expr(expr, None)],
+                    })
+                }
+            }
+        }
+
+        todo!()
+        /*
+        Output { const_block, item: item.into(), item_impl: None, bitwise_impl }
+            attrs: item_attrs,
+            vis: item_vis,
+            token: quote!(enum),
+            ident: item_ident,
+            body: quote!({ #item_variants }),
+            methods: vec![],
+            bitwise_impl: BitwiseImpl {
+                width: item_width,
+                repr: item_repr,
+                from_repr_unchecked: quote! {
+                    // FIXME: is there a less 'wildly unsafe' version to this?
+                    ::core::mem::transmute(repr)
+                },
+                from_repr_checked: quote! {
+                    match repr as usize {
+                        #(#from_repr_checked_arms,)*
+                        _ => None,
+                    }
+                },
+                to_repr: quote! {
+                    // FIXME: is there an equivalent safe version?
+                    unsafe { *(self as *const Self as *const _) }
+                },
             },
-            to_repr: quote! {
-                // FIXME: is there an equivalent safe version?
-                unsafe { *(self as *const Self as *const _) }
-            },
-        },
+        }
+        */
     }
-    .into_token_stream();
-    output.extend(prelude);
-
-    output.into()
-}
-
-fn check_variant_fields(fields: syn::Fields) -> Result<(), Error> {
-    if fields.is_empty() {
-        return Err(err!(fields.span(); "variant fields are not supported"));
-    }
-
-    Ok(())
 }
