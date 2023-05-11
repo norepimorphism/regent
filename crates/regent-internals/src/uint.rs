@@ -9,6 +9,7 @@ use super::*;
 /// Models an unsigned integer type of arbitrary bit-width: <code>u&#8239;<em>width</em></code>.
 ///
 /// This type is not [spanned](Span2).
+#[derive(Clone, Copy)]
 pub(crate) struct PseudoType {
     width: usize,
 }
@@ -19,7 +20,7 @@ impl PseudoType {
     /// This returns `None` if `ident` is not an unsigned integer (i.e., not of the form
     /// <code>u&#8239;<em>width</em></code>), `Some(Err(_))` if `ident` appears to be an unsigned
     /// integer but the *width* suffix fails to parse or is zero, and `Some(Ok(_))` otherwise.
-    pub(crate) fn parse(ident: syn::Ident) -> Option<Result<Self, Error>> {
+    pub(crate) fn parse(ident: &syn::Ident) -> Option<Result<Self, Error>> {
         let (span, ident) = (ident.span(), ident.to_string());
         let Some(("", width)) = ident.split_once('u') else {
             // This is not even an unsigned integer.
@@ -50,7 +51,7 @@ impl PseudoType {
     /// primitive.
     ///
     /// [exist]: Self::exists
-    fn round_up(&mut self) {
+    pub(crate) fn round_up(&mut self) {
         if self.width <= 8 {
             self.width = 8;
             return;
@@ -84,6 +85,12 @@ impl PseudoType {
     /// This method returns `None` if this pseudo-type does not [exist](Self::exists).
     pub(crate) fn try_into_rust_type(self) -> Option<RustType> {
         self.exists().then(|| RustType { width: self.width })
+    }
+}
+
+impl fmt::Display for PseudoType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "u{}", self.width)
     }
 }
 
@@ -125,7 +132,7 @@ impl RustType {
         {
             let ident = attr.parse_args::<syn::Ident>().map_err(Error)?;
             let span = ident.span();
-            let repr = match PseudoType::parse(ident) {
+            let repr = match PseudoType::parse(&ident) {
                 Some(Ok(ty)) => ty
                     .try_into_rust_type()
                     .ok_or_else(|| err!(span; "argument cannot be a pseudo-type")),

@@ -1,32 +1,32 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::prelude::*;
+use super::*;
 
-pub(super) trait Endec {
-    /// Generates an expression that produces a value of this type from a representation.
+pub(super) trait HasRepr {
+    /// Produces a value of this type from a representation.
     fn decode(&self, repr_width: Width, repr_expr: syn::Expr) -> syn::Expr;
 
-    /// Generates an expression that produces a representation from a value of this type.
+    /// Produces a representation of this type from a value.
     fn encode(&self, repr_width: Width, value_exprs: syn::Expr) -> syn::Expr;
 }
 
-impl Endec for Type {
+impl HasRepr for field::Type {
     fn decode(&self, repr_width: Width, repr_expr: syn::Expr) -> syn::Expr {
         match self {
-            Self::Prime(ty) => ty.decode(repr_width, repr_expr),
+            Self::Elem(ty) => ty.decode(repr_width, repr_expr),
             _ => unsafe { self.decode_container(repr_width, repr_expr) },
         }
     }
 
     fn encode(&self, repr_width: Width, value_expr: syn::Expr) -> syn::Expr {
         match self {
-            Self::Prime(ty) => ty.encode(repr_width, value_expr),
+            Self::Elem(ty) => ty.encode(repr_width, value_expr),
             _ => unsafe { self.encode_container(repr_width, value_expr) },
         }
     }
 }
 
-impl Type {
+impl field::Type {
     unsafe fn decode_container(&self, repr_width: Width, repr_expr: syn::Expr) -> syn::Expr {
         let span = repr_expr.span();
 
@@ -50,9 +50,9 @@ impl Type {
         // Reversal is necessary because we take from the least-significant bits of `repr`,
         // which represent the current last element.
 
-        // This closure generates a block that extracts the next element from a container
-        // type (i.e., tuple or array).
-        let get_elem_block = |elem_ty: &PrimeType| {
+        // This closure produces a `syn::Block` that extracts the next element from a container type
+        // (i.e., tuple or array).
+        let get_elem_block = |elem_ty: &field::ElemType| {
             let elem_width = elem_ty.width();
 
             // {
@@ -64,7 +64,6 @@ impl Type {
             syn::Block {
                 brace_token,
                 stmts: vec![
-                    // let elem = #elem;
                     syn::Stmt::Local(syn::Local {
                         attrs: vec![],
                         let_token,
@@ -83,23 +82,17 @@ impl Type {
                         }),
                         semi_token,
                     }),
-                    // #repr_expr >>= #elem_width;
                     syn::Stmt::Expr(
                         syn::ExprBinary {
                             attrs: vec![],
                             left: Box::new(repr_expr),
                             op: syn::BinOp::ShrAssign(syn::Token![>>=](span)),
-                            right: Box::new(elem_width.into_expr().into()),
+                            right: Box::new(elem_width.into_expr()),
                         }
                         .into(),
                         Some(semi_token),
                     ),
-                    // elem
-                    syn::Stmt::Expr(
-                        syn::ExprPath { attrs: vec![], qself: None, path: elem_ident.into() }
-                            .into(),
-                        None,
-                    ),
+                    syn::Stmt::Expr(expr_path!(elem_ident), None),
                 ],
             }
         };
@@ -110,8 +103,8 @@ impl Type {
         let make_tmp_local_and_elems_expr =
             |elem_tys: &(dyn DoubleEndedIterator
                    + ExactSizeIterator
-                   + Iterator<Item = PrimeType>),
-             get_elem_expr: fn(&PrimeType) -> syn::Expr,
+                   + Iterator<Item = field::ElemType>),
+             get_elem_expr: fn(&field::ElemType) -> syn::Expr,
              make_accessor: fn(usize) -> syn::Expr,
              make_container: fn(Elements) -> syn::Expr| {
                 let (tmp_elems, elems): (Elements, Elements) = (*elem_tys)
@@ -144,7 +137,7 @@ impl Type {
             };
 
         match self {
-            Self::Prime(_) => std::hint::unreachable_unchecked(),
+            Self::Elem(_) => std::hint::unreachable_unchecked(),
             Self::Tuple(elem_tys) => {
                 let (tmp_local, elems_expr) = make_tmp_local_and_elems_expr(
                     elem_tys,
@@ -314,8 +307,7 @@ impl Type {
         let semi_token = syn::Token![;](span);
 
         // repr
-        let repr_expr: syn::Expr =
-            syn::ExprPath { attrs: vec![], qself: None, path: repr_ident.into() }.into();
+        let repr_expr = expr_path!(repr_ident);
         // let repr = 0;
         let repr_local = syn::Local {
             attrs: vec![],
@@ -339,7 +331,7 @@ impl Type {
         };
         // This closure generates a set of statements that collectively set the next element
         // in a container type (i.e., tuple or array).
-        let set_elem_stmts = |elem_ty: &PrimeType, elem_expr| {
+        let set_elem_stmts = |elem_ty: &field::ElemType, elem_expr| {
             let make_stmt = |op, right| {
                 syn::Stmt::Expr(
                     syn::ExprBinary {
@@ -368,7 +360,7 @@ impl Type {
         };
 
         match self {
-            Self::Prime(_) => std::hint::unreachable_unchecked(),
+            Self::Elem(_) => std::hint::unreachable_unchecked(),
             Self::Tuple(tys) => {
                 // #repr_local
                 // #set_elem_stmts
@@ -471,7 +463,7 @@ impl Type {
     }
 }
 
-impl Endec for PrimeType {
+impl HasRepr for PrimeType {
     fn decode(&self, repr_width: Width, repr_expr: syn::Expr) -> syn::Expr {
         let span = repr_expr.span();
         let inner = syn::ExprBinary {

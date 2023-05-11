@@ -105,8 +105,8 @@ macro_rules! type_path {
 
 mod checks;
 mod forms;
-mod sum;
 mod uint;
+mod width;
 
 use std::iter::once;
 
@@ -114,8 +114,8 @@ use checks::*;
 use forms::*;
 use proc_macro::TokenStream;
 use proc_macro2::Span as Span2;
-use sum::*;
 use syn::{__private::ToTokens, parse::Parser as _, punctuated::Punctuated, spanned::Spanned as _};
+use width::*;
 
 /// The whole point.
 ///

@@ -27,12 +27,12 @@ impl Form for Enum {
 
             let span = variant.span();
 
-            // `discrim` is the discriminant of `variant` as a `usize`, and `discrim_lit` is
-            // `discrim` as a `syn::LitInt`.
+            // `discrim` is the discriminant as a `usize`, and `discrim_lit` is the discriminant as
+            // a `syn::LitInt`.
             //
-            // If the user explicitly specifies a discriminant, we will use that for `discrim`.
-            // Otherwise, `discrim` will be one greater than the last discriminant (or zero if this
-            // is the first variant).
+            // If the user explicitly specifies a discriminant, we will use that. Otherwise, the
+            // discriminant will be one greater than the last discriminant (or zero if this is the
+            // first variant).
             let (discrim, discrim_lit) = if let Some((_, expr)) = &variant.discriminant {
                 let span = expr.span();
                 let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(lit ), .. }) = expr else {
@@ -43,7 +43,7 @@ impl Form for Enum {
                 if let Some(max_discrim) = max_discrim {
                     // An additional restriction beyond standard Rust enums is that variant
                     // discriminants must be monotonically increasing. This is done primarily to
-                    // protect against duplicate discriminants without using a `HashSet` (or
+                    // protect against duplicate discriminants without needing a `HashSet` (or
                     // similar).
                     if discrim <= max_discrim {
                         return Err(

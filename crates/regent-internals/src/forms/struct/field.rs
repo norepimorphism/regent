@@ -1,18 +1,79 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Types accepted in struct field position.
-
-mod elem;
-mod uint;
-
-pub(crate) use elem::*;
-pub(crate) use uint::*;
-
 use super::*;
+
+#[derive(Default)]
+pub(super) struct Args {
+    pub(super) constant: Option<syn::Expr>,
+}
+
+impl Args {
+    pub(super) fn parse(attrs: &mut Vec<syn::Attribute>) -> Result<Self, Error> {
+        let mut result = Self::default();
+
+        let mut i = 0;
+        while i < attrs.len() {
+            match unsafe { attrs.get_unchecked(i) }.meta {
+                syn::Meta::Path(path) if path.is_ident("constant") => {
+                    let span = path.span();
+                    let value = || {
+                        let func_qself = syn::QSelf {
+                            lt_token: syn::Token![<](span),
+                            ty: Box::new(syn::TypeInfer { underscore_token: syn::Token![_](span) }.into()),
+                            position: 3,
+                            as_token: Some(syn::Token![as](span)),
+                            gt_token: syn::Token![>](span),
+                        };
+                        let func = syn::ExprPath {
+                            attrs: vec![],
+                            qself: Some(func_qself),
+                            path: path!(span; ::core::default::Default::default),
+                        }
+                        .into();
+                        let value = syn::ExprCall {
+                            attrs: vec![],
+                            func: Box::new(func),
+                            paren_token: syn::token::Paren(span),
+                            args: Punctuated::new(),
+                        }
+                        .into();
+
+                        Ok(value)
+                    };
+                    Self::set_field(span, &mut result.constant, value)?;
+                }
+                syn::Meta::NameValue(pair) if pair.path.is_ident("constant") => {
+                    Self::set_field(pair.span(), &mut result.constant, || Ok(pair.value))?;
+                }
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            }
+
+            attrs.remove(i);
+        }
+
+        Ok(result)
+    }
+
+    fn set_field<T>(
+        span: Span2,
+        field: &mut Option<T>,
+        value: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<(), Error> {
+        if field.is_some() {
+            return Err(err!(span; "attribute is a duplicate"));
+        }
+        *field = Some(value()?);
+
+        Ok(())
+    }
+}
 
 /// The type of a struct field.
 #[derive(Clone)]
-pub(crate) enum Type {
+pub(super) enum Type {
     /// An [element type](ElemType).
     Elem(ElemType),
     /// A tuple of [element types](ElemType).
@@ -30,12 +91,12 @@ pub(crate) enum Type {
 
 impl Type {
     /// Attempts to parse a `Type` from the given [`syn::Type`].
-    pub(crate) fn parse(ty: syn::Type) -> Result<Self, Error> {
+    pub(super) fn parse(ty: syn::Type) -> Result<Self, Error> {
         match ty {
             syn::Type::Path(elem) => ElemType::parse(elem).map(Self::Elem),
             syn::Type::Tuple(tuple) => Self::parse_tuple(tuple.span(), tuple.elems),
             syn::Type::Array(array) => Self::parse_array(array.span(), *array.elem, array.len),
-            _ => Err(err!(ty.span(); "type is not supported")),
+            _ => Err(err!(ty.span(); "field type is not supported")),
         }
     }
 
@@ -50,6 +111,9 @@ impl Type {
                 }
             })
             .collect::<Result<Vec<ElemType>, _>>()?;
+        if elems.is_empty() {
+            return Err(err!(span; "tuple cannot have zero elements"));
+        }
 
         Ok(Self::Tuple(span, elems))
     }
@@ -59,16 +123,21 @@ impl Type {
             return Err(err!(elem.span(); "array element must be a path"));
         };
         let elem = ElemType::parse(elem)?;
+
+        let len_span = len.span();
         let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(len), .. }) = len else {
-            return Err(err!(len.span(); "array length must be an integer literal"));
+            return Err(err!(len_span; "array length must be an integer literal"));
         };
         let len = len.base10_parse().map_err(Error)?;
+        if len == 0 {
+            return Err(err!(len_span; "array length cannot be zero"));
+        }
 
         Ok(Self::Array { span, elem, len })
     }
 
-    /// Attempts to losslessly convert this type into a valid API type.
-    pub(crate) fn try_into_api_type(self) -> Result<Self, Error> {
+    /// Attempts to convert this type into an API type.
+    pub(super) fn try_into_api_type(self) -> Result<Self, Error> {
         match self {
             Self::Elem(elem) => elem.try_into_api_type().map(Self::Elem),
             Self::Tuple(span, elems) => elems.into_iter()
@@ -81,7 +150,7 @@ impl Type {
     }
 
     /// The span of this type.
-    pub(crate) fn span(&self) -> Span2 {
+    pub(super) fn span(&self) -> Span2 {
         match self {
             Self::Elem(elem) => elem.span(),
             Self::Tuple(span, _) => *span,
@@ -90,22 +159,12 @@ impl Type {
     }
 
     /// The bit-width of this type.
-    pub(crate) fn width(self) -> Width {
+    pub(super) fn width(self) -> Width {
         match self {
             Self::Elem(elem) => elem.width(),
             Self::Tuple(span, elems) => elems.into_iter().fold(
                 Width::zero(span),
-                |acc, elem| match (acc, elem.width()) {
-                    (Width::Met(_, lhs), Width::Met(_, rhs)) => {
-                        Width::Met(span, lhs + rhs)
-                    }
-                    (lhs, rhs) => Width::Ct(syn::ExprBinary {
-                        attrs: vec![],
-                        left: Box::new(lhs.into_expr()),
-                        op: syn::BinOp::Add(syn::Token![+](span)),
-                        right: Box::new(rhs.into_expr()),
-                    }.into()),
-                },
+                |acc, elem| Width::add(acc, elem.width()),
             ),
             Self::Array { span, elem, len } => match elem.width() {
                 Width::Met(_, elem_width) => Width::Met(span, elem_width * len),
@@ -123,30 +182,12 @@ impl Type {
     }
 
     /// Determines if this type exists.
-    pub(crate) fn exists(&self) -> bool {
+    pub(super) fn exists(&self) -> bool {
         match self {
             Self::Elem(elem) => elem.exists(),
             Self::Tuple(_, elems) => elems.iter().all(ElemType::exists),
             Self::Array { elem, .. } => elem.exists(),
         }
-    }
-
-    pub(crate) fn validate(&self) -> Result<(), Error> {
-        match self {
-            Type::Tuple(span, elems) => {
-                if elems.is_empty() {
-                    return Err(err!(*span; "struct field cannot be the unit type"));
-                }
-            }
-            Type::Array { span, len, .. } => {
-                if *len == 0 {
-                    return Err(err!(*span; "struct field cannot be zero-sized"));
-                }
-            }
-            _ => {}
-        }
-
-        Ok(())
     }
 }
 
@@ -169,6 +210,116 @@ impl From<Type> for syn::Type {
                 }.into(),
             }
             .into(),
+        }
+    }
+}
+
+/// An inner type in a [tuple] or [array].
+///
+/// [tuple]: Type::Tuple
+/// [array]: Type::Array
+#[derive(Clone)]
+pub(super) enum ElemType {
+    /// A boolean: `bool`.
+    Bool(Span2),
+    /// A [`uint::PseudoType`].
+    UInt(Span2, uint::PseudoType),
+    /// A user-defined type that implements the `Bitwise` trait.
+    ImplBitwise(syn::TypePath),
+}
+
+impl ElemType {
+    /// Attempts to parse an `ElemType` from the given [`syn::TypePath`].
+    pub(super) fn parse(ty: syn::TypePath) -> Result<Self, Error> {
+        let span = ty.span();
+        if let Some(ident) = ty.path.get_ident() {
+            if ident == "bool" {
+                return Ok(Self::Bool(span));
+            }
+            if let Some(result) = uint::PseudoType::parse(ident) {
+                return result.map(|ty| Self::UInt(span, ty));
+            }
+        }
+
+        // We can't determinate at macro evaluation time if `ty` implements `Bitwise`, so we give
+        // the benefit of the doubt.
+        Ok(Self::ImplBitwise(ty))
+    }
+
+    /// Attempts to convert this type into an API type.
+    pub(super) fn try_into_api_type(self) -> Result<Self, Error> {
+        match self {
+            Self::UInt(span, mut ty) => {
+                ty.round_up();
+
+                if ty.exists() {
+                    Ok(Self::UInt(span, ty))
+                } else {
+                    // FIXME: improve error message
+                    Err(err!(span; "this cannot be made into an API type"))
+                }
+            }
+            _ => Ok(self),
+        }
+    }
+
+    /// The span of this type.
+    pub(super) fn span(&self) -> Span2 {
+        match self {
+            Self::Bool(span) => *span,
+            Self::UInt(span, _) => *span,
+            Self::ImplBitwise(ty) => ty.span(),
+        }
+    }
+
+    /// The bit-width of this type.
+    pub(super) fn width(self) -> Width {
+        match self {
+            Self::Bool(span) => Width::Met(span, 1),
+            Self::UInt(span, ty) => Width::Met(span, ty.width()),
+            Self::ImplBitwise(ty) => Width::Ct({
+                let span = ty.span();
+
+                syn::ExprPath {
+                    attrs: vec![],
+                    qself: Some(syn::QSelf {
+                        lt_token: syn::Token![<](span),
+                        ty: Box::new(ty.into()),
+                        position: 2,
+                        as_token: Some(syn::Token![as](span)),
+                        gt_token: syn::Token![>](span),
+                    }),
+                    path: path!(span; ::regent::Bitwise::WIDTH),
+                }
+                .into()
+            }),
+        }
+    }
+
+    /// Determines if this type exists.
+    pub(super) fn exists(&self) -> bool {
+        match self {
+            Self::Bool(_) => true,
+            Self::UInt(_, ty) => ty.exists(),
+            // We can't determine at macro evaluation time if the type exists, so we give the
+            // benefit of the doubt.
+            Self::ImplBitwise(_) => true,
+        }
+    }
+}
+
+impl From<ElemType> for syn::Type {
+    fn from(ty: ElemType) -> Self {
+        syn::TypePath::from(ty).into()
+    }
+}
+
+impl From<ElemType> for syn::TypePath {
+    fn from(ty: ElemType) -> Self {
+        match ty {
+            ElemType::Bool(span) => Self { qself: None, path: path!(span; bool) },
+            ElemType::UInt(span, ty) => Self { qself: None, path: syn::Ident::new(&ty.to_string(), span).into() },
+            ElemType::ImplBitwise(ty) => ty,
         }
     }
 }

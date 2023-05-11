@@ -83,17 +83,17 @@ Rust is a new systems programming language with an emphasis on performance and c
 
 ### What are Bitfields?
 
-For all of the things Rust has, *bitfields* it has not. Roughly speaking, a bitfield is a struct field whose width is measured in bits rather than bytes. Structs comprised of bitfields are tightly packed, making them convenient for representing dense structures like CPU registers and network packets. Without bitfields, these structures are usually represented with integers and manipulated through handcrafted bitwise operations, which are tedious to write and difficult to debug.
+For all of the things Rust has, *bitfields* it has not. Roughly speaking, a bitfield is an unaligned struct field that inhabits a subset of the bits allowed by its type. These properties allow structs of bitfields to constitute bit patterns that normal structs cannot, like the contents of CPU registers and network packets. In languages without bitfields, these structures are usually represented by integers and manipulated through handcrafted bitwise operations, which are tedious to write and difficult to debug.
 
 <details>
 <summary>Motivating Example</summary>
 <br>
 
-![A diagram of a 32-bit CPU register](./resources/mips-r3000-sr.png)
+![Diagram of 32-bit CPU status register](./resources/mips-r3000-sr.png)
 
 > (Source: [*IDT R30xx Family Software Reference Manual*](https://cgi.cse.unsw.edu.au/~cs3231/doc/R3000.pdf), published in 1994 by Integrated Device Technology, Inc.)
 
-Take the status register from a MIPS CPU, for example. Imagine modeling this structure in your favorite programming language without using bitfields. A register field might look something like this:
+The above diagram describes the fields in the status register of a MIPS CPU. Imagine modeling this structure in your favorite programming language without using bitfields. In C, a register field might look something like this:
 
 ```c
 // Extracts the IM field from the status register.

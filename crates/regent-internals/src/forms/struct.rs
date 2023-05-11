@@ -2,9 +2,10 @@
 
 //! The `bitwise` macro for structs.
 
-// mod endec;
+mod repr;
+mod field;
 
-// use endec::Endec as _;
+use repr::HasRepr as _;
 use super::*;
 
 pub(crate) struct Struct;
@@ -12,59 +13,79 @@ pub(crate) struct Struct;
 impl Form for Struct {
     type Item = syn::ItemStruct;
 
-    fn bitwise(_item: Self::Item) -> Result<Output<Self::Item>, Error> {
-        todo!()
+    fn bitwise(item: Self::Item) -> Result<Output<Self::Item>, Error> {
+        check_generics(&item.generics)?;
 
-        /*
-        check_generics(item.generics)?;
         let item_span = item.span();
 
-        // These next few variables are default-initialized for now and will be continuously updated
-        // during field processing.
+        // Common tokens with span `item_span`.
+        let brace_token = syn::token::Brace(item_span);
+        let impl_token = syn::Token![impl](item_span);
+        let paren_token = syn::token::Paren(item_span);
+
+        // This corresponds to `Output::impl_item`. We will fill the `items` field as we go.
+        let mut impl_item = syn::ItemImpl {
+            attrs: vec![],
+            defaultness: None,
+            unsafety: None,
+            impl_token,
+            generics: Default::default(),
+            trait_: None,
+            self_ty: Box::new(type_path!(item.ident.clone())),
+            brace_token,
+            items: vec![],
+        };
 
         // This is the total bit-width of all fields.
         let mut item_width = Width::zero(item_span);
-        let mut item_fn_blocks = vec![];
-        // This is the list of all arguments accepted by `#item_ident::new`.
-        let mut item_new_args = vec![];
-        // This is a list of 'snippets' (or series of statements) that initialize the fields in
-        // `#item_ident::new`.
-        let mut item_new_stmts = vec![];
-        // FIXME: name is inconsistent
-        let mut from_repr_checked_body = TokenStream2::new();
 
-        // Process fields.
+        // Note: we can use `into_iter` here because we will later replace `item.fields` with a
+        // single field for the item representation.
         for (i, field) in item.fields.into_iter().enumerate() {
-            let field_span = field.span();
+            // This is the field type 'as written'.
+            let ty = field::Type::parse(field.ty)?;
+            // This is the bit-width of the field according to `ty`.
+            let width = ty.width();
+            // Update the total item width before we forget.
+            item_width = Width::add(item_width, width);
+            // This is the API-friendly version of the field type (e.g., `u8` instead of `u5`).
+            let ty = ty.try_into_api_type()?;
 
-            let field_ident = field.ident.unwrap_or_else(|| syn::Ident::new(&format!("f{i}"), field_span));
+            let args = field::Args::parse(&mut field.attrs)?;
 
-            let field_ty = Type::parse(field_span, field.ty)?;
-            field_ty.validate(field_span)?;
-
-            // This is the position of the least-significant bit of this field.
-            let field_offset = item_width.clone();
-            // This is the exact width of this field.
-            let field_width = field_ty.width();
-            item_width.add(&field_width);
-
-            let field_ty = field_ty.as_rust_primitives();
-            if !field_ty.exists() {
-                return Err(err!(
-                    field_span;
-                    "'bitwise' field cannot be represented in terms of primitive Rust types"
-                ));
+            let span = field.span();
+            // This is the `syn::Ident` of the getter method.
+            let getter_ident = field.ident.unwrap_or_else(|| syn::Ident::new(&format!("f{i}"), span));
+            // This closure produces a getter method as a `syn::ImplItem`.
+            let make_getter = |is_const: bool, stmts| syn::ImplItemFn {
+                attrs: field.attrs,
+                vis: field.vis,
+                defaultness: None,
+                sig: syn::Signature {
+                    constness: is_const.then_some(syn::Token![const](span)),
+                    asyncness: None,
+                    unsafety: None,
+                    abi: None,
+                    fn_token: syn::Token![fn](span),
+                    ident: getter_ident,
+                    generics: Default::default(),
+                    paren_token: syn::token::Paren(span),
+                    inputs: Punctuated::new(),
+                    variadic: None,
+                    output: syn::ReturnType::Type(syn::Token![->](span), Box::new(ty.into())),
+                },
+                block: syn::Block { brace_token: syn::token::Brace(span), stmts },
             }
-
-            let mut field_value = None;
-            let field_args = FieldArgs::parse(field_span, &mut field.attrs)?;
+            .into();
 
             let new_glue: syn::Expr;
-            if let Some(field_value) = field_args.constant {
-                // This is the simple case for constant fields only. We don't need to generate getters
-                // or setters.
+            if let Some(constant_value) = args.constant {
+                // This is the simple case for a constant field. We only need to generate a getter
+                // method.
 
-                let field_decoded = field_ty.decode(quote!(repr), &field_width);
+                let decoded = ty.decode(quote!(repr), &field_width);
+                // This is the getter method.
+                let getter = make_getter(true, vec![]);
                 from_repr_checked_body.extend(quote!({
                     let repr: ItemRepr = repr >> (#field_offset);
                     let actual_value: #field_ty = #field_decoded;
@@ -75,7 +96,11 @@ impl Form for Struct {
                 }));
                 new_glue = field_ty.encode(field_value, &field_width);
             } else {
-                // This is the more complicated case for non-constant fields.
+                // This is the complex case for a non-constant field. We need to generate both
+                // getter and setter methods.
+
+                // This is the `syn::Ident` of the setter method.
+                let setter_ident = syn::Ident::new(&format!("set_{getter_ident}"), getter_ident.span());
 
                 let field_decoded = field_ty.decode(quote!(field_as_repr), &field_width);
                 let field_encoded = field_ty.encode(quote!(field), &field_width);
@@ -106,7 +131,7 @@ impl Form for Struct {
         }
 
         let item_repr =
-            unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
+            uint::RustType::repr_for_item(item_span, &item_width, &mut item.attrs)?;
 
         item_methods.push(Method {
             sig: quote!(#item_vis fn new(#(#item_new_args),*) -> Self),
@@ -146,65 +171,6 @@ impl Form for Struct {
         );
 
         output.into()
-        */
-    }
-}
-
-/*
-#[derive(Default)]
-struct FieldArgs {
-    constant: Option<syn::Expr>,
-}
-
-impl FieldArgs {
-    fn parse(span: Span2, attrs: &mut Vec<syn::Attribute>) -> Result<Self, Error> {
-        let mut result = Self::default();
-
-        let as_token = syn::Token![as](span);
-        let gt_token = syn::Token![>](span);
-        let lt_token = syn::Token![<](span);
-        let paren_token = syn::token::Paren(span);
-        let path_sep_token = syn::Token![::](span);
-        let underscore_token = syn::Token![_](span);
-
-        attrs.retain(|attr| match attr.meta {
-            syn::Meta::Path(path) if path.is_ident("constant") => {
-                let fn_qself = syn::QSelf {
-                    lt_token,
-                    ty: Box::new(syn::TypeInfer { underscore_token }.into()),
-                    position: 3,
-                    as_token: Some(as_token),
-                    gt_token,
-                };
-                let fn_path = syn::Path {
-                    leading_colon: Some(path_sep_token),
-                    segments: ["core", "default", "Default", "default"].into_iter().collect(),
-                };
-
-                result.constant = Some(
-                    syn::ExprCall {
-                        attrs: vec![],
-                        func: Box::new(
-                            syn::ExprPath { attrs: vec![], qself: Some(fn_qself), path: fn_path }
-                                .into(),
-                        ),
-                        paren_token,
-                        args: Default::default(),
-                    }
-                    .into(),
-                );
-
-                true
-            }
-            syn::Meta::NameValue(pair) if pair.path.is_ident("constant") => {
-                result.constant = Some(pair.value);
-
-                true
-            }
-            _ => false,
-        });
-
-        Ok(result)
     }
 }
 
@@ -249,4 +215,3 @@ fn make_mask(repr_width: Width, width: Width) -> syn::Expr {
     }
     .into()
 }
-*/
