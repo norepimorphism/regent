@@ -26,8 +26,7 @@ impl PseudoType {
             return None;
         };
         let Ok(width) = width.parse() else {
-            // FIXME: improve error message
-            return Some(Err(err!(span; "failed to parse integer width suffix")));
+            return Some(Err(err!(span; "integer has invalid width suffix")));
         };
         if width == 0 {
             return Some(Err(err!(span; "this cannot be zero-sized")));
@@ -37,6 +36,7 @@ impl PseudoType {
     }
 
     /// The bit-width of this type.
+    #[allow(unused)]
     pub(crate) fn width(&self) -> usize {
         self.width
     }
@@ -81,9 +81,7 @@ impl PseudoType {
 
     /// Attempts to convert this `PseudoType` into a [`RustType`].
     ///
-    /// This method returns `None` if this pseudo-type does not [exist].
-    ///
-    /// [exist]: Self::exists
+    /// This method returns `None` if this pseudo-type does not [exist](Self::exists).
     pub(crate) fn try_into_rust_type(self) -> Option<RustType> {
         self.exists().then(|| RustType { width: self.width })
     }
@@ -92,6 +90,7 @@ impl PseudoType {
 /// Models an unsigned integer primitive that exists in Rust: `u8`, `u16`, `u32`, `u64`, or `u128`.
 ///
 /// This type is not [spanned](Span2).
+#[derive(Clone, Copy)]
 pub(crate) struct RustType {
     width: usize,
 }
@@ -99,96 +98,73 @@ pub(crate) struct RustType {
 impl RustType {
     /// Determines the best representation for an item.
     ///
-    /// ### Arguments
-    ///
-    /// `expected_width` may contain a bit-width originating from the [`size`] or [`width`]
-    /// arguments to the `#[bitwise]` attribute. If present, this bit-width represents the user's
-    /// expectation of the minimum number of bits necessary to represent all struct fields or encode
-    /// all enum variants&mdash;whichever it is.
-    ///
-    /// [`size`]: crate::Args::size
-    /// [`width`]: crate::Args::width
-    ///
-    /// `item_width` is the actual computed bit-width of the item. This method makes no assumption
-    /// as to whether this value is equivalent to `expected_width`.
-    ///
-    /// `item_attrs` is a mutable reference to the list of outer attributes on the item.
-    ///
-    /// ### Behavior
-    ///
     /// If `item_attrs` contains a `#[repr]` attribute, its argument is parsed as a [`PseudoType`].
     /// If successful, the attribute is removed from `item_attrs` (so it will not appear on the
-    /// emitted item), and then the `PseudoType` is converted to `RustType` and returned as the
-    /// item's representation. Otherwise, an error is returned.
+    /// emitted item), and then the `PseudoType` is converted to `RustType` and returned.
     ///
-    /// If `item_attrs` does not contain a `#[repr]` attribute, the `expected_width` and
-    /// `item_width` arguments are consulted, in that order, as candidates for the bit-width of the
-    /// item's representation. If `expected_width` is `Some(_)`, its corresponding `PseudoType` is
-    /// rounded up to a `RustType` and returned. Otherwise, if `item_width` is determinate at
-    /// macro evaluation time (i.e., of kind [`Met`]), its `PseudoType` is rounded up and returned.
-    /// Finally, if neither candidate succeeds, an error is returned.
+    /// If `item_attrs` does not contain a `#[repr]` attribute but the `item_width` argument is
+    /// determinate at macro evaluation time (i.e., of kind [`Met`]), a `PseudoType` is constructed
+    /// with width `item_width`, [rounded up] to a `RustType`, and returned.
+    ///
+    /// If neither of these conditions are satisfied, an error is returned.
     ///
     /// [`Met`]: Width::Met
+    /// [rounded up]: PseudoType::round_up
+    ///
+    /// # Arguments
+    ///
+    /// `item_span` is a span covering the entire item. `item_width` is the computed bit-width of
+    /// the item. `item_attrs` is a mutable reference to the list of outer attributes on the item.
     pub(crate) fn repr_for_item(
-        expected_width: Option<usize>,
+        item_span: Span2,
         item_width: &Width,
         item_attrs: &mut Vec<syn::Attribute>,
     ) -> Result<Self, Error> {
         if let Some((i, attr)) =
             item_attrs.iter().enumerate().find(|(_, attr)| attr.path().is_ident("repr"))
         {
-            let repr = attr.parse_args::<syn::Ident>().map_err(Error::new).and_then(|ident| {
-                let span = ident.span();
-
-                match PseudoType::parse(ident) {
-                    Some(Ok(ty)) => ty.try_into_rust_type().ok_or_else(|| err!(
-                        span;
-                        "argument cannot be a pseudo-type",
-                    )),
-                    Some(Err(e)) => Err(e),
-                    None => Err(err!(span; "argument must be an unsigned integer primitive")),
-                }
-            })?;
+            let ident = attr.parse_args::<syn::Ident>().map_err(Error)?;
+            let span = ident.span();
+            let repr = match PseudoType::parse(ident) {
+                Some(Ok(ty)) => ty
+                    .try_into_rust_type()
+                    .ok_or_else(|| err!(span; "argument cannot be a pseudo-type")),
+                Some(Err(e)) => Err(e),
+                None => Err(err!(span; "argument must be an unsigned integer primitive")),
+            }?;
             item_attrs.remove(i);
 
-            Ok(repr)
-        } else {
-            let span = expected_width.span();
-
-            let mut pseudo = if let Some(width) = expected_width {
-                PseudoType { width }
-            } else {
-                match item_width {
-                    Width::Met(_, width) => PseudoType { width: *width },
-                    Width::Ct(_) => {
-                        return Err(err!(
-                            span;
-                            "not enough information to compute item width at macro evaluation time",
-                        ));
-                    }
-                }
-            };
-            pseudo.round_up();
-
-            pseudo.try_into_rust_type().ok_or_else(|| err!(
-                span;
-                "item cannot be represented by any unsigned integer primitive",
-            ))
+            return Ok(repr);
         }
+
+        let mut pseudo_type = match item_width {
+            Width::Met(_, width) => PseudoType { width: *width },
+            Width::Ct(_) => {
+                return Err(err!(
+                    item_span;
+                    "not enough information to compute item width at macro evaluation time",
+                ));
+            }
+        };
+        pseudo_type.round_up();
+
+        pseudo_type.try_into_rust_type().ok_or_else(|| {
+            err!(
+                item_span;
+                "item cannot be represented by any unsigned integer primitive",
+            )
+        })
     }
 
     /// The bit-width of this type.
+    #[allow(unused)]
     pub(crate) fn width(&self) -> usize {
         self.width
     }
 
     /// Converts this `RustType` into a [`syn::Type`].
     pub(crate) fn into_syn_type(self, span: Span2) -> syn::Type {
-        syn::TypePath {
-            qself: None,
-            path: syn::Ident::new(&self.to_string(), span).into(),
-        }
-        .into()
+        type_path!(syn::Ident::new(&self.to_string(), span))
     }
 }
 

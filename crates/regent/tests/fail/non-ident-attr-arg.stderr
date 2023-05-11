@@ -1,0 +1,17 @@
+error: argument path must be an identifier
+ --> tests/fail/non-ident-attr-arg.rs:3:23
+  |
+3 |     #[regent::bitwise(::foo = 0)]
+  |                       ^^^^^
+
+error: argument path must be an identifier
+ --> tests/fail/non-ident-attr-arg.rs:6:23
+  |
+6 |     #[regent::bitwise(foo::bar = 0)]
+  |                       ^^^^^^^^
+
+error: argument path must be an identifier
+ --> tests/fail/non-ident-attr-arg.rs:9:23
+  |
+9 |     #[regent::bitwise(foo::bar::qux = 0)]
+  |                       ^^^^^^^^^^^^^

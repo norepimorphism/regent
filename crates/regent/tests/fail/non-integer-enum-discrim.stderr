@@ -1,0 +1,29 @@
+error: variant discriminant must be an integer literal
+ --> tests/fail/non-integer-enum-discrim.rs:4:19
+  |
+4 |     enum A { _0 = [0] }
+  |                   ^^^
+
+error: variant discriminant must be an integer literal
+ --> tests/fail/non-integer-enum-discrim.rs:7:19
+  |
+7 |     enum B { _0 = true }
+  |                   ^^^^
+
+error: variant discriminant must be an integer literal
+  --> tests/fail/non-integer-enum-discrim.rs:10:19
+   |
+10 |     enum C { _0 = 'a' }
+   |                   ^^^
+
+error: variant discriminant must be an integer literal
+  --> tests/fail/non-integer-enum-discrim.rs:13:19
+   |
+13 |     enum D { _0 = "abc" }
+   |                   ^^^^^
+
+error: variant discriminant must be an integer literal
+  --> tests/fail/non-integer-enum-discrim.rs:16:19
+   |
+16 |     enum E { _0 = () }
+   |                   ^^

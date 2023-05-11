@@ -21,6 +21,8 @@ pub trait Bitwise: Sized {
     fn from_repr_checked(repr: Self::Repr) -> Option<Self>;
 
     fn to_repr(&self) -> Self::Repr;
+
+    fn into_repr(self) -> Self::Repr;
 }
 
 pub trait BitwiseExt: Bitwise {

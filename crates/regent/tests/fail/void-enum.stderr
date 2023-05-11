@@ -1,0 +1,5 @@
+error: enum cannot have zero variants
+ --> tests/fail/void-enum.rs:3:15
+  |
+3 |     enum Void {}
+  |               ^^

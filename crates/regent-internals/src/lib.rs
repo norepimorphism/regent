@@ -4,15 +4,15 @@
 //!
 //! This crate provides the [`bitwise`] proc macro that is re-exported by the main *regent* crate.
 
-/// Like [`try`](std::try) except the return type of the containing function is `T` instead of
-/// [`Result<T, E>`](Result).
-macro_rules! unwrap {
-    ($expr:expr) => {
-        match $expr {
-            Ok(it) => it,
-            Err(e) => { return e; }
-        }
-    };
+/// The error type returned by fallible functions in *regent-internals*.
+///
+/// This is a wrapper over [`syn::Error`] and is convertible into [`TokenStream`].
+struct Error(syn::Error);
+
+impl From<Error> for TokenStream {
+    fn from(e: Error) -> Self {
+        e.0.into_compile_error().into()
+    }
 }
 
 /// Creates an [`Error`] with the given message and, optionally, span.
@@ -23,30 +23,30 @@ macro_rules! err {
         err!(Span2::call_site();  $fmt $(, $fmt_arg)*)
     };
     ($span:expr ; $fmt:expr $(, $fmt_arg:expr)* $(,)?) => {
-        Error::new(syn::Error::new($span, format!($fmt $(, $fmt_arg)*)))
+        Error(syn::Error::new($span, format!($fmt $(, $fmt_arg)*)))
     };
 }
 
-/// Creates a [`syn::Path`] from the given path segments and span.
+/// Creates a [`syn::Path`] from the given path and span.
 macro_rules! path {
-    ($span:expr ; $($seg:tt)*) => {
+    ($span:expr ; $head_seg:ident $(:: $tail_seg:ident)*) => {
         path!(@internal => {
             span: $span,
             leading_colon: None,
-            segments: $($seg)*
+            segments: $head_seg $($tail_seg)*,
         })
     };
-    ($span:expr ; :: $($seg:tt)*) => {
+    ($span:expr ; :: $head_seg:ident $(:: $tail_seg:ident)*) => {
         path!(@internal => {
             span: $span,
             leading_colon: Some(syn::Token![::]($span)),
-            segments: $($seg)*
+            segments: $head_seg $($tail_seg)*,
         })
     };
     (@internal => {
         span: $span:expr,
         leading_colon: $leading_colon:expr,
-        segments: $($seg:tt)*
+        segments: $($seg:ident)* $(,)?
     }) => {
         syn::Path {
             leading_colon: $leading_colon,
@@ -58,38 +58,82 @@ macro_rules! path {
     };
 }
 
-/// Creates a [`syn::TypePath`] from the given path segments and span.
+/// Creates an implementation of `From<syn::ExprPath>` from the given path and span.
+///
+/// The concrete type of the result is inferred from context.
+///
+/// The macro offers two syntaxes: one compatible with [`path`], and one that accepts a
+/// path-convertible expression.
+macro_rules! expr_path {
+    ($span:expr ; $($path_piece:tt)*) => {
+        syn::ExprPath { attrs: vec![], qself: None, path: path!($span; $($path_piece)*) }.into()
+    };
+    ($path:expr $(,)?) => {
+        syn::ExprPath { attrs: vec![], qself: None, path: $path.into() }.into()
+    }
+}
+
+/// Creates an implementation of `From<syn::PatPath>` from the given path and span.
+///
+/// The concrete type of the result is inferred from context.
+///
+/// The macro offers two syntaxes: one compatible with [`path`], and one that accepts a
+/// path-convertible expression.
+macro_rules! pat_path {
+    ($span:expr ; $($path_piece:tt)*) => {
+        syn::PatPath { attrs: vec![], qself: None, path: path!($span; $($path_piece)*) }.into()
+    };
+    ($path:expr $(,)?) => {
+        syn::PatPath { attrs: vec![], qself: None, path: $path.into() }.into()
+    }
+}
+
+/// Creates an implementation of `From<syn::TypePath>` from the given path and span.
+///
+/// The concrete type of the result is inferred from context.
+///
+/// The macro offers two syntaxes: one compatible with [`path`], and one that accepts a
+/// path-convertible expression.
 macro_rules! type_path {
     ($span:expr ; $($path_piece:tt)*) => {
         syn::TypePath { qself: None, path: path!($span; $($path_piece)*) }.into()
     };
+    ($path:expr $(,)?) => {
+        syn::TypePath { qself: None, path: $path.into() }.into()
+    }
 }
 
-mod r#enum;
-mod prelude;
-mod r#struct;
+mod checks;
+mod forms;
+mod sum;
+mod uint;
 
-use r#enum::Enum;
-use prelude::*;
-use r#struct::Struct;
+use std::iter::once;
+
+use checks::*;
+use forms::*;
+use proc_macro::TokenStream;
+use proc_macro2::Span as Span2;
+use sum::*;
+use syn::{__private::ToTokens, parse::Parser as _, punctuated::Punctuated, spanned::Spanned as _};
 
 /// The whole point.
 ///
 /// Refer to the `spec` module in the crate root for usage information.
 #[proc_macro_attribute]
 pub fn bitwise(args: TokenStream, item: TokenStream) -> TokenStream {
-    let args = unwrap!(Args::parse(args).map_err(TokenStream::from));
+    let args = match Args::parse(args) {
+        Ok(it) => it,
+        Err(e) => {
+            return e.into();
+        }
+    };
     let expected_width = args.expected_width();
 
-    let result = match syn::parse_macro_input!(item as _) {
-        syn::Item::Struct(item) => Struct::bitwise(expected_width, item).map(TokenStream::from),
-        syn::Item::Enum(item) => Enum::bitwise(expected_width, item).map(TokenStream::from),
-        item => Err(err!(item.span(); "item must be a struct or enum")),
-    };
-
-    match result {
-        Ok(it) => it,
-        Err(e) => e.into(),
+    match syn::parse_macro_input!(item as _) {
+        syn::Item::Struct(item) => Struct::bitwise_as_token_stream(expected_width, item),
+        syn::Item::Enum(item) => Enum::bitwise_as_token_stream(expected_width, item),
+        item => err!(item.span(); "item must be a struct or enum").into(),
     }
 }
 
@@ -113,9 +157,14 @@ impl Args {
     /// [`TokenStream`].
     fn parse(args: TokenStream) -> Result<Self, Error> {
         let mut output = Self::default();
+
+        if args.is_empty() {
+            return Ok(output);
+        }
+
         syn::meta::parser(|meta| {
             let ident = meta.path.get_ident().ok_or_else(|| -> syn::Error {
-                err!(meta.path.span(); "argument path must be an identifier").into()
+                syn::Error::new(meta.path.span(), "argument path must be an identifier")
             })?;
             let arg = if ident == "size" {
                 &mut output.size
@@ -136,7 +185,7 @@ impl Args {
             Ok(())
         })
         .parse(args)
-        .map_err(Error::new)?;
+        .map_err(Error)?;
 
         if output.size.is_some() && output.width.is_some() {
             return Err(err!("`size` and `width` arguments are mutually exclusive"));
@@ -162,21 +211,36 @@ trait Form {
     type Item;
 
     /// A form of [`bitwise`].
+    fn bitwise(item: Self::Item) -> Result<Output<Self::Item>, Error>;
+}
+
+trait FormExt: Form {
+    /// A wrapper over [`Form::bitwise`] that maps the result to a [`TokenStream`].
     ///
     /// # Arguments
     ///
-    /// `expected_width` is the result of [`Args::expected_width`]. `item` is the primary input to
-    /// the macro.
-    fn bitwise(expected_width: Option<usize>, item: Self::Item) -> Result<Output<Self::Item>, Error>;
+    /// `expected_width` is forwarded to [`Output::try_into_token_stream`]. `item` is forwarded to
+    /// [`Form::bitwise`].
+    fn bitwise_as_token_stream(expected_width: Option<usize>, item: Self::Item) -> TokenStream;
+}
+
+impl<T: Form> FormExt for T
+where
+    T::Item: ToTokens,
+{
+    fn bitwise_as_token_stream(expected_width: Option<usize>, item: Self::Item) -> TokenStream {
+        let result =
+            Self::bitwise(item).and_then(|output| output.try_into_token_stream(expected_width));
+
+        match result {
+            Ok(it) => it,
+            Err(e) => e.into(),
+        }
+    }
 }
 
 /// The output of [`Form::bitwise`].
 struct Output<Item> {
-    /// An optional [block](syn::Block) to be executed in a `const` context at the global scope.
-    ///
-    /// When present, this block typically contains compile-time assertions for invariants that
-    /// cannot be checked at macro evaluation time.
-    const_block: Option<syn::Block>,
     /// The emitted item.
     item: Item,
     /// The <code>impl&nbsp;<em>item</em></code> [impl block](syn::ItemImpl) for [the emitted
@@ -184,6 +248,98 @@ struct Output<Item> {
     impl_item: Option<syn::ItemImpl>,
     /// The implementation of the `Bitwise` trait for [the emitted item](Self::item).
     impl_bitwise_for_item: BitwiseImpl,
+}
+
+impl<Item: ToTokens> Output<Item> {
+    /// Attempts to render this as a [`TokenStream`].
+    ///
+    /// This method consumes `self`. It returns [`Err`] if the `expected_width` argument differs
+    /// from [`self.impl_bitwise_for_item.width`](BitwiseImpl::width).
+    ///
+    /// # Arguments
+    ///
+    /// `expected_width` is the result of [`Args::expected_width`].
+    fn try_into_token_stream(self, expected_width: Option<usize>) -> Result<TokenStream, Error> {
+        // This is an optional item containing a block to be executed in a `const` context at the
+        // global scope.
+        //
+        // When present, this block asserts at compile-time that `expected_width` equals
+        // `self.impl_bitwise_for_item.width`.
+        let const_check_item = match expected_width {
+            None => None,
+            // This is where we enforce `expected_width`.
+            //
+            // FIXME: consider inverting control flow such that `EnforceItemWidthStrategy::devise`
+            // leads into assigning a value to `const_check_item`.
+            Some(expected_width) => match EnforceItemWidthStrategy::devise(
+                expected_width,
+                // FIXME: don't clone
+                self.impl_bitwise_for_item.width.clone(),
+            ) {
+                EnforceItemWidthStrategy::None => None,
+                EnforceItemWidthStrategy::Fail(e) => {
+                    return Err(e);
+                }
+                EnforceItemWidthStrategy::ConstCheck(expr) => {
+                    let span = expr.span();
+
+                    // This looks like:
+                    //   const _: () = { #expr };
+                    //
+                    // This trick forces `expr` to be evaluated at compile-time.
+                    Some(syn::ItemConst {
+                        attrs: vec![],
+                        vis: syn::Visibility::Inherited,
+                        const_token: syn::Token![const](span),
+                        ident: syn::Ident::new("_", span),
+                        generics: Default::default(),
+                        colon_token: syn::Token![:](span),
+                        ty: Box::new(
+                            syn::TypeTuple {
+                                paren_token: syn::token::Paren(span),
+                                elems: Punctuated::new(),
+                            }
+                            .into(),
+                        ),
+                        eq_token: syn::Token![=](span),
+                        expr: Box::new(
+                            syn::ExprBlock {
+                                attrs: vec![],
+                                label: None,
+                                block: syn::Block {
+                                    brace_token: syn::token::Brace(span),
+                                    stmts: vec![syn::Stmt::Expr(expr, None)],
+                                },
+                            }
+                            .into(),
+                        ),
+                        semi_token: syn::Token![;](span),
+                    })
+                }
+            },
+        };
+
+        let impl_bitwise_for_item = self.impl_bitwise_for_item.into_item_impl(self.item.span());
+
+        /// Constructs an array of [`TokenStream`]s from the given list of [`ToTokens`]
+        /// implementors.
+        macro_rules! make_token_streams {
+            ($($to_tokens:expr),* $(,)?) => {
+                [ $( TokenStream::from($to_tokens.into_token_stream()) ),* ]
+            };
+        }
+
+        let token_stream = make_token_streams![
+            const_check_item,
+            self.item,
+            self.impl_item,
+            impl_bitwise_for_item,
+        ]
+        .into_iter()
+        .collect();
+
+        Ok(token_stream)
+    }
 }
 
 /// An implementation of the `Bitwise` trait.
@@ -198,85 +354,17 @@ struct BitwiseImpl {
     funcs: BitwiseFuncs,
 }
 
-/// Associated function implementations for the `Bitwise` trait.
-///
-/// This struct consists of [`syn::Block`]s rather than [`syn::ItemFn`]s because the function
-/// signatures can be inferred from context.
-struct BitwiseFuncs {
-    /// The block for the `from_repr_unchecked` function.
-    from_repr_unchecked: syn::Block,
-    /// The block for the `from_repr_checked` function.
-    from_repr_checked: syn::Block,
-    /// The block for the `to_repr` function.
-    to_repr: syn::Block,
-}
-
-impl<Item: ToTokens> From<Output<Item>> for TokenStream {
-    fn from(output: Output<Item>) -> Self {
-        TokenStream2::from(output).into()
-    }
-}
-
-impl<Item: ToTokens> From<Output<Item>> for TokenStream2 {
-    fn from(output: Output<Item>) -> Self {
-        macro_rules! make_token_streams {
-            ($($to_tokens:expr),* $(,)?) => { [$($to_tokens.into_token_stream()),*] };
-        }
-
-        let item_span = output.item.span();
-
-        make_token_streams![
-            output.const_block.map(Output::<Item>::make_const_item),
-            output.item,
-            output.impl_item,
-            output.impl_bitwise_for_item.into_item_impl(item_span),
-        ]
-        .into_iter()
-        .collect()
-    }
-}
-
-impl<Item> Output<Item> {
-    fn make_const_item(block: syn::Block) -> syn::ItemConst {
-        let span = block.span();
-
-        syn::ItemConst {
-            attrs: vec![],
-            vis: syn::Visibility::Inherited,
-            const_token: syn::Token![const](span),
-            ident: syn::Ident::new("_", span),
-            generics: Default::default(),
-            colon_token: syn::Token![:](span),
-            ty: Box::new(syn::TypeTuple {
-                paren_token: syn::token::Paren(span),
-                elems: Punctuated::new(),
-            }.into()),
-            eq_token: syn::Token![=](span),
-            expr: Box::new(syn::ExprBlock { attrs: vec![], label: None, block }.into()),
-            semi_token: syn::Token![;](span),
-        }
-    }
-}
-
 impl BitwiseImpl {
+    /// Converts this into a [`syn::ItemImpl`] with the given span.
     fn into_item_impl(self, span: Span2) -> syn::ItemImpl {
-        let and_token = syn::Token![&](span);
         let brace_token = syn::token::Brace(span);
         let colon_token = syn::Token![:](span);
         let const_token = syn::Token![const](span);
         let eq_token = syn::Token![=](span);
-        let fn_token = syn::Token![fn](span);
         let for_token = syn::Token![for](span);
-        let gt_token = syn::Token![>](span);
         let impl_token = syn::Token![impl](span);
-        let lt_token = syn::Token![<](span);
-        let paren_token: syn::token::Paren = syn::token::Paren(span);
-        let path_sep_token = syn::Token![::](span);
-        let r_arrow_token = syn::Token![->](span);
-        let self_token = syn::Token![self](span);
         let semi_token = syn::Token![;](span);
         let type_token = syn::Token![type](span);
-        let unsafe_token = syn::Token![unsafe](span);
 
         let width_item = syn::ImplItemConst {
             attrs: vec![],
@@ -286,7 +374,7 @@ impl BitwiseImpl {
             ident: syn::Ident::new("WIDTH", span),
             generics: Default::default(),
             colon_token,
-            ty: syn::TypePath { qself: None, path: path!(span; usize) }.into(),
+            ty: type_path!(span; usize),
             eq_token,
             expr: self.width.into_expr(),
             semi_token,
@@ -318,39 +406,79 @@ impl BitwiseImpl {
             impl_token,
             generics: Default::default(),
             trait_: Some((None, path!(span; ::regent::Bitwise), for_token)),
-            self_ty: Box::new(syn::TypePath { qself: None, path: self.ident.into() }.into()),
+            self_ty: Box::new(type_path!(self.ident)),
             brace_token,
             items,
         }
     }
 }
 
+/// Associated function implementations for the `Bitwise` trait.
+///
+/// This struct consists of [`syn::Block`]s rather than [`syn::ItemFn`]s because the function
+/// signatures can be inferred from context.
+struct BitwiseFuncs {
+    /// The block for the `from_repr_unchecked` function.
+    from_repr_unchecked: syn::Block,
+    /// The block for the `from_repr_checked` function.
+    from_repr_checked: syn::Block,
+    /// The block for the `to_repr` function.
+    to_repr: syn::Block,
+    /// The block for the `into_repr` function.
+    into_repr: syn::Block,
+}
+
 impl BitwiseFuncs {
     /// Converts this into an iterator of [`syn::ImplItemFn`]s.
     fn into_iter(self) -> impl Iterator<Item = syn::ImplItemFn> {
+        /// Models the receiver function argument: `self`, `&self`, or `&mut self`.
         struct Receiver {
+            /// Whether or not this receiver is borrowed: `&self` or `&mut self`.
             is_borrowed: bool,
+            /// Whether or not this receiver is mutable: `mut self` or `&mut self`.
             is_mutable: bool,
         }
 
         impl Receiver {
+            /// Converts this into a [`syn::FnArg`] with the given span.
             fn into_arg(self, span: Span2) -> syn::FnArg {
+                let mut_token = self.is_mutable.then_some(syn::Token![mut](span));
+                let self_path = type_path!(span; Self);
+                let (reference, mutability, ty) = if self.is_borrowed {
+                    let and_token = syn::Token![&](span);
+                    let ty = syn::TypeReference {
+                        and_token,
+                        lifetime: None,
+                        mutability: mut_token,
+                        elem: Box::new(self_path),
+                    }
+                    .into();
+
+                    (Some((and_token, None)), None, ty)
+                } else {
+                    (None, mut_token, self_path)
+                };
+
                 syn::FnArg::Receiver(syn::Receiver {
                     attrs: vec![],
-                    reference: self.is_borrowed.then_some((syn::Token![&](span), None)),
-                    mutability: self.is_mutable.then_some(syn::Token![mut](span)),
+                    reference,
+                    mutability,
                     self_token: syn::Token![self](span),
                     colon_token: None,
-                    ty: Box::new(type_path!(span; Self)),
+                    ty: Box::new(ty),
                 })
             }
         }
 
+        // This closure is a helper for constructing `syn::Signature`s.
+        //
+        // Note that the `inputs` argument does not include the receiver, which is specified
+        // separately by the `receiver` argument.
         let make_sig_for_block = |is_const: bool,
                                   is_unsafe: bool,
                                   ident: &str,
                                   receiver: Option<Receiver>,
-                                  inputs: fn(Span2) -> Vec<syn::FnArg>,
+                                  inputs: fn(Span2) -> Vec<syn::PatType>,
                                   output: fn(Span2) -> Option<syn::Type>,
                                   block: &syn::Block| {
             let span = block.span();
@@ -367,7 +495,7 @@ impl BitwiseFuncs {
                 inputs: receiver
                     .into_iter()
                     .map(|it| it.into_arg(span))
-                    .chain(inputs(span))
+                    .chain(inputs(span).into_iter().map(syn::FnArg::Typed))
                     .collect(),
                 variadic: None,
                 output: match output(span) {
@@ -377,6 +505,7 @@ impl BitwiseFuncs {
             }
         };
 
+        /// Constructs a [`syn::Signature`] and [`syn::Block`] pair.
         macro_rules! make_fn_from_block {
             (
                 is_const: $is_const:expr,
@@ -401,34 +530,33 @@ impl BitwiseFuncs {
             };
         }
 
-        fn make_repr_arg(span: Span2) -> syn::FnArg {
-            syn::FnArg::Typed(syn::PatType {
+        /// Produces a [`syn::PatType`] of the form `repr: Self::Repr` with the given span.
+        fn make_repr_arg(span: Span2) -> syn::PatType {
+            syn::PatType {
                 attrs: vec![],
-                pat: Box::new(
-                    syn::PatPath {
-                        attrs: vec![],
-                        qself: None,
-                        path: path!(span; repr),
-                    }
-                    .into(),
-                ),
+                pat: Box::new(pat_path!(span; repr)),
                 colon_token: syn::Token![:](span),
                 ty: Box::new(type_path!(span; Self::Repr)),
-            })
+            }
         }
 
+        /// Produces a [`syn::Type`] of the form `::core::option::Option::<Self>` with the given
+        /// span.
         fn make_option_self_ty(span: Span2) -> syn::Type {
             let segments = ["core", "option"]
                 .into_iter()
                 .map(|it| syn::Ident::new(it, span).into())
                 .chain([syn::PathSegment {
                     ident: syn::Ident::new("Option", span),
-                    arguments: syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments {
-                        colon2_token: Some(syn::Token![::](span)),
-                        lt_token: syn::Token![<](span),
-                        args: once(syn::GenericArgument::Type(type_path!(span; Self))).collect(),
-                        gt_token: syn::Token![>](span),
-                    }),
+                    arguments: syn::PathArguments::AngleBracketed(
+                        syn::AngleBracketedGenericArguments {
+                            colon2_token: Some(syn::Token![::](span)),
+                            lt_token: syn::Token![<](span),
+                            args: once(syn::GenericArgument::Type(type_path!(span; Self)))
+                                .collect(),
+                            gt_token: syn::Token![>](span),
+                        },
+                    ),
                 }])
                 .collect();
 
@@ -459,10 +587,18 @@ impl BitwiseFuncs {
             make_fn_from_block! {
                 is_const: false,
                 is_unsafe: false,
-                receiver: Some(Receiver { is_borrowed: false, is_mutable: false }),
+                receiver: Some(Receiver { is_borrowed: true, is_mutable: false }),
                 inputs: |_| vec![],
                 output: |span| Some(type_path!(span; Self::Repr)),
                 block: to_repr,
+            },
+            make_fn_from_block! {
+                is_const: false,
+                is_unsafe: false,
+                receiver: Some(Receiver { is_borrowed: false, is_mutable: false }),
+                inputs: |_| vec![],
+                output: |span| Some(type_path!(span; Self::Repr)),
+                block: into_repr,
             },
         ]
         .into_iter()

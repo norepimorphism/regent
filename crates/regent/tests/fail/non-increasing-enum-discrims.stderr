@@ -1,0 +1,5 @@
+error: variant discriminant must be greater than the previous
+ --> tests/fail/non-increasing-enum-discrims.rs:3:27
+  |
+3 |     enum A { _0 = 1, _1 = 0 }
+  |                           ^

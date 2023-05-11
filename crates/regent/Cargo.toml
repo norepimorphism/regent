@@ -18,3 +18,7 @@ nightly = ["regent-internals/nightly"]
 
 [dependencies]
 regent-internals = { path = "../regent-internals", version = "0.2.0" }
+
+[dev-dependencies]
+macrotest = "1.0"
+trybuild = "1.0"

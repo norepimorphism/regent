@@ -1,0 +1,15 @@
+error: `size` and `width` arguments are mutually exclusive
+ --> tests/fail/mutually-exclusive-attr-args.rs:3:5
+  |
+3 |     #[regent::bitwise(size = 1, width = 8)]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `regent::bitwise` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: `size` and `width` arguments are mutually exclusive
+ --> tests/fail/mutually-exclusive-attr-args.rs:6:5
+  |
+6 |     #[regent::bitwise(size = 1, width = 1)]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `regent::bitwise` (in Nightly builds, run with -Z macro-backtrace for more info)

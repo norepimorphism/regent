@@ -2,9 +2,9 @@
 
 //! The `bitwise` macro for structs.
 
-mod endec;
+// mod endec;
 
-use endec::Endec as _;
+// use endec::Endec as _;
 use super::*;
 
 pub(crate) struct Struct;
@@ -12,10 +12,10 @@ pub(crate) struct Struct;
 impl Form for Struct {
     type Item = syn::ItemStruct;
 
-    fn bitwise(
-        expected_width: Option<usize>,
-        item: Self::Item,
-    ) -> Result<Output<Self::Item>, Error> {
+    fn bitwise(_item: Self::Item) -> Result<Output<Self::Item>, Error> {
+        todo!()
+
+        /*
         check_generics(item.generics)?;
         let item_span = item.span();
 
@@ -105,49 +105,6 @@ impl Form for Struct {
             });
         }
 
-        let mut const_checks: Vec<syn::Expr> = vec![];
-        if let Some(expected_width) = expected_width {
-            match EnforceItemWidthStrategy::devise(expected_width, &item_width) {
-                EnforceItemWidthStrategy::None => {}
-                EnforceItemWidthStrategy::Fail(e) => {
-                    return e.into();
-                }
-                EnforceItemWidthStrategy::ConstCheck(check) => {
-                    const_checks.push(check);
-                }
-            }
-        }
-        // const _: () = { #(#const_checks ;)* }
-        let const_checks: syn::Item = syn::ItemConst {
-            attrs: vec![],
-            vis: syn::Visibility::Inherited,
-            const_token: syn::Token![const](item_span),
-            ident: syn::Ident::new("_", item_span),
-            generics: Default::default(),
-            colon_token: syn::Token![:](item_span),
-            ty: Box::new(
-                syn::TypeTuple { paren_token: syn::token::Paren(item_span), elems: Default::default() }
-                    .into(),
-            ),
-            eq_token: syn::Token![=](item_span),
-            expr: Box::new(
-                syn::ExprBlock {
-                    attrs: vec![],
-                    label: None,
-                    block: syn::Block {
-                        brace_token: syn::token::Brace(item_span),
-                        stmts: const_checks
-                            .into_iter()
-                            .map(|expr| syn::Stmt::Expr(expr, Some(syn::Token![;](item_span))))
-                            .collect(),
-                    },
-                }
-                .into(),
-            ),
-            semi_token: syn::Token![;](item_span),
-        }
-        .into();
-
         let item_repr =
             unwrap!(determine_item_repr(expected_width, item_span, &mut item_attrs, &item_width));
 
@@ -189,9 +146,11 @@ impl Form for Struct {
         );
 
         output.into()
+        */
     }
 }
 
+/*
 #[derive(Default)]
 struct FieldArgs {
     constant: Option<syn::Expr>,
@@ -290,3 +249,4 @@ fn make_mask(repr_width: Width, width: Width) -> syn::Expr {
     }
     .into()
 }
+*/

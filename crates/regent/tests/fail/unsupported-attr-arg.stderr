@@ -1,0 +1,23 @@
+error: argument is not supported
+ --> tests/fail/unsupported-attr-arg.rs:3:23
+  |
+3 |     #[regent::bitwise(foo = 0)]
+  |                       ^^^
+
+error: argument is not supported
+ --> tests/fail/unsupported-attr-arg.rs:6:33
+  |
+6 |     #[regent::bitwise(size = 1, foo = 0)]
+  |                                 ^^^
+
+error: argument is not supported
+ --> tests/fail/unsupported-attr-arg.rs:9:23
+  |
+9 |     #[regent::bitwise(foo = 0, size = 1)]
+  |                       ^^^
+
+error: argument is not supported
+  --> tests/fail/unsupported-attr-arg.rs:12:23
+   |
+12 |     #[regent::bitwise(foo = 0, bar = 0)]
+   |                       ^^^

@@ -62,7 +62,7 @@ impl Type {
         let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(len), .. }) = len else {
             return Err(err!(len.span(); "array length must be an integer literal"));
         };
-        let len = len.base10_parse().map_err(Error::new)?;
+        let len = len.base10_parse().map_err(Error)?;
 
         Ok(Self::Array { span, elem, len })
     }

@@ -1,0 +1,59 @@
+error: item must be a struct or enum
+ --> tests/fail/unsupported-item.rs:4:5
+  |
+4 |     mod module {}
+  |     ^^^^^^^^^^^^^
+
+error: item must be a struct or enum
+ --> tests/fail/unsupported-item.rs:7:5
+  |
+7 |     use module::*;
+  |     ^^^^^^^^^^^^^^
+
+error: item must be a struct or enum
+  --> tests/fail/unsupported-item.rs:10:5
+   |
+10 |     fn function() {}
+   |     ^^^^^^^^^^^^^^^^
+
+error: item must be a struct or enum
+  --> tests/fail/unsupported-item.rs:13:5
+   |
+13 |     type Type = ();
+   |     ^^^^^^^^^^^^^^^
+
+error: item must be a struct or enum
+  --> tests/fail/unsupported-item.rs:16:5
+   |
+16 |     union Union {}
+   |     ^^^^^^^^^^^^^^
+
+error: item must be a struct or enum
+  --> tests/fail/unsupported-item.rs:19:5
+   |
+19 |     const CONST: () = ();
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+error: item must be a struct or enum
+  --> tests/fail/unsupported-item.rs:22:5
+   |
+22 |     static STATIC: () = ();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: item must be a struct or enum
+  --> tests/fail/unsupported-item.rs:25:5
+   |
+25 |     trait Trait {}
+   |     ^^^^^^^^^^^^^^
+
+error: item must be a struct or enum
+  --> tests/fail/unsupported-item.rs:28:5
+   |
+28 |     impl Trait for Union {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: item must be a struct or enum
+  --> tests/fail/unsupported-item.rs:31:5
+   |
+31 |     extern "C" {}
+   |     ^^^^^^^^^^^^^

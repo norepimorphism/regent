@@ -8,9 +8,7 @@ use super::*;
 ///
 /// The `bitwise` macro does not support generic items. This function ensures that the current item
 /// is not generic.
-///
-/// `generics` is passed by-value to discourage its use after this function is called.
-pub(crate) fn check_generics(generics: syn::Generics) -> Result<(), Error> {
+pub(crate) fn check_generics(generics: &syn::Generics) -> Result<(), Error> {
     let syn::Generics { params, where_clause, .. } = generics;
     if !params.is_empty() {
         return Err(err!(params.span(); "generics parameters are not supported in this context"));
@@ -67,7 +65,7 @@ impl EnforceItemWidthStrategy {
     ///
     /// This produces an expression of the form:
     ///
-    /// ```no_run
+    /// ```ignore
     /// if #expected_width != #actual_width {
     ///     ::core::panicking::panic(/* panic message */);
     /// }
@@ -75,13 +73,6 @@ impl EnforceItemWidthStrategy {
     fn const_check(expected_width: usize, actual_width: Width) -> Self {
         let span = actual_width.span();
 
-        let panic_path = syn::Path {
-            leading_colon: Some(syn::Token![::](span)),
-            segments: ["core", "panicking", "panic"]
-                .into_iter()
-                .map(|it| syn::PathSegment::from(syn::Ident::new(it, span)))
-                .collect(),
-        };
         let panic_arg = syn::Expr::Lit(syn::ExprLit {
             attrs: vec![],
             // FIXME: print item ident so the user knows that the heck we're talking about
@@ -90,9 +81,7 @@ impl EnforceItemWidthStrategy {
         let panic_stmt = syn::Stmt::Expr(
             syn::ExprCall {
                 attrs: vec![],
-                func: Box::new(
-                    syn::ExprPath { attrs: vec![], qself: None, path: panic_path }.into(),
-                ),
+                func: Box::new(expr_path!(span; ::core::panicking::panic)),
                 paren_token: syn::token::Paren(span),
                 args: once(panic_arg).collect(),
             }

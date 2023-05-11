@@ -46,15 +46,13 @@ impl Sum {
     pub(crate) fn into_parenthesized_expr(self) -> syn::Expr {
         parenthesize(self.into_expr())
     }
-
-    pub(crate) fn parenthesize(&mut self) {
-        if let Self::Ct(expr) = self {
-            *expr = parenthesize(*expr);
-        }
-    }
 }
 
 fn parenthesize(expr: syn::Expr) -> syn::Expr {
-    syn::ExprParen { attrs: vec![], paren_token: syn::token::Paren(expr.span()), expr: Box::new(expr) }
-        .into()
+    syn::ExprParen {
+        attrs: vec![],
+        paren_token: syn::token::Paren(expr.span()),
+        expr: Box::new(expr),
+    }
+    .into()
 }

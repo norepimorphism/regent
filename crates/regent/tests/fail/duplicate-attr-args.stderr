@@ -1,0 +1,23 @@
+error: argument is a duplicate
+ --> tests/fail/duplicate-attr-args.rs:3:33
+  |
+3 |     #[regent::bitwise(size = 1, size = 1)]
+  |                                 ^^^^
+
+error: argument is a duplicate
+ --> tests/fail/duplicate-attr-args.rs:6:33
+  |
+6 |     #[regent::bitwise(size = 1, size = 2)]
+  |                                 ^^^^
+
+error: argument is a duplicate
+ --> tests/fail/duplicate-attr-args.rs:9:33
+  |
+9 |     #[regent::bitwise(size = 1, size = 1, size = 1)]
+  |                                 ^^^^
+
+error: argument is a duplicate
+  --> tests/fail/duplicate-attr-args.rs:12:33
+   |
+12 |     #[regent::bitwise(size = 1, size = 2, size = 3)]
+   |                                 ^^^^
