@@ -1,12 +1,25 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Models of unsigned integer types.
+//! Unsigned integer models.
 
 use std::fmt;
 
 use super::*;
 
+/// Implements [`fmt::Display`] for the given unsigned integer model.
+macro_rules! impl_display {
+    ($ty:ty) => {
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "u{}", self.width)
+            }
+        }
+    };
+}
+
 /// Models an unsigned integer type of arbitrary bit-width: <code>u&#8239;<em>width</em></code>.
+///
+/// This type corresponds to the *&lt;uint-type&gt;* syntactical rule from the specification.
 ///
 /// This type is not [spanned](Span2).
 #[derive(Clone, Copy)]
@@ -37,20 +50,16 @@ impl PseudoType {
     }
 
     /// The bit-width of this type.
-    #[allow(unused)]
     pub(crate) fn width(&self) -> usize {
         self.width
     }
 
-    /// Rounds [the width] of this type up to the next smallest power of two that is at least 8.
+    /// Rounds [the width](Self::width) of this type up to the next smallest power of two that is at
+    /// least 8.
     ///
-    /// [the width]: Self::width
-    ///
-    /// This type is not guaranteed to [exist] after calling this method. For example, if the
-    /// original width was 255, it will be rounded up to 256 despite the nonexistence of the `u256`
-    /// primitive.
-    ///
-    /// [exist]: Self::exists
+    /// This type is not guaranteed to [exist](Self::exists) after calling this method. For example,
+    /// if the original width was 255, it will be rounded up to 256 despite the nonexistence of the
+    /// `u256` primitive.
     pub(crate) fn round_up(&mut self) {
         if self.width <= 8 {
             self.width = 8;
@@ -69,30 +78,21 @@ impl PseudoType {
 
     /// Determines if this pseudo-type models an unsigned integer primitive that exists in Rust.
     ///
-    /// This method returns `true` only if [the width] of this type is a power of two between 8 and
-    /// 128, inclusive.
-    ///
-    /// [the width]: Self::width
+    /// This method returns `true` only if [the width](Self::width) of this type is a power of two
+    /// between 8 and 128, inclusive.
     pub(crate) fn exists(&self) -> bool {
-        match self.width {
-            8 | 16 | 32 | 64 | 128 => true,
-            _ => false,
-        }
+        matches!(self.width, 8 | 16 | 32 | 64 | 128)
     }
 
     /// Attempts to convert this `PseudoType` into a [`RustType`].
     ///
     /// This method returns `None` if this pseudo-type does not [exist](Self::exists).
     pub(crate) fn try_into_rust_type(self) -> Option<RustType> {
-        self.exists().then(|| RustType { width: self.width })
+        self.exists().then_some(RustType { width: self.width })
     }
 }
 
-impl fmt::Display for PseudoType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "u{}", self.width)
-    }
-}
+impl_display!(PseudoType);
 
 /// Models an unsigned integer primitive that exists in Rust: `u8`, `u16`, `u32`, `u64`, or `u128`.
 ///
@@ -106,26 +106,29 @@ impl RustType {
     /// Determines the best representation for an item.
     ///
     /// If `item_attrs` contains a `#[repr]` attribute, its argument is parsed as a [`PseudoType`].
-    /// If successful, the attribute is removed from `item_attrs` (so it will not appear on the
-    /// emitted item), and then the `PseudoType` is converted to `RustType` and returned.
+    /// If successful, the `handle_repr_attr` callback is invoked, and then the `PseudoType` is
+    /// converted to `RustType` and returned.
     ///
     /// If `item_attrs` does not contain a `#[repr]` attribute but the `item_width` argument is
     /// determinate at macro evaluation time (i.e., of kind [`Met`]), a `PseudoType` is constructed
     /// with width `item_width`, [rounded up] to a `RustType`, and returned.
     ///
-    /// If neither of these conditions are satisfied, an error is returned.
-    ///
     /// [`Met`]: Width::Met
     /// [rounded up]: PseudoType::round_up
+    ///
+    /// If neither of these conditions are satisfied, an error is returned.
     ///
     /// # Arguments
     ///
     /// `item_span` is a span covering the entire item. `item_width` is the computed bit-width of
-    /// the item. `item_attrs` is a mutable reference to the list of outer attributes on the item.
+    /// the item. `item_attrs` is a mutable reference to the outer attributes on the item.
+    /// `handle_repr_attr` is a callback that receives `item_attrs` and the index of the `#[repr]`
+    /// attribute if it was found.
     pub(crate) fn repr_for_item(
         item_span: Span2,
         item_width: &Width,
         item_attrs: &mut Vec<syn::Attribute>,
+        handle_repr_attr: impl FnOnce(&mut Vec<syn::Attribute>, usize),
     ) -> Result<Self, Error> {
         if let Some((i, attr)) =
             item_attrs.iter().enumerate().find(|(_, attr)| attr.path().is_ident("repr"))
@@ -139,7 +142,7 @@ impl RustType {
                 Some(Err(e)) => Err(e),
                 None => Err(err!(span; "argument must be an unsigned integer primitive")),
             }?;
-            item_attrs.remove(i);
+            handle_repr_attr(item_attrs, i);
 
             return Ok(repr);
         }
@@ -156,27 +159,19 @@ impl RustType {
         pseudo_type.round_up();
 
         pseudo_type.try_into_rust_type().ok_or_else(|| {
-            err!(
-                item_span;
-                "item cannot be represented by any unsigned integer primitive",
-            )
+            err!(item_span; "item cannot be represented by any unsigned integer primitive")
         })
     }
 
     /// The bit-width of this type.
-    #[allow(unused)]
     pub(crate) fn width(&self) -> usize {
         self.width
     }
 
-    /// Converts this `RustType` into a [`syn::Type`].
+    /// Converts this into a [`syn::Type`] with the given span.
     pub(crate) fn into_syn_type(self, span: Span2) -> syn::Type {
         type_path!(syn::Ident::new(&self.to_string(), span))
     }
 }
 
-impl fmt::Display for RustType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "u{}", self.width)
-    }
-}
+impl_display!(RustType);

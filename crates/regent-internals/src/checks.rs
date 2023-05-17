@@ -41,7 +41,11 @@ impl EnforceItemWidthStrategy {
     /// implementors of`Bitwise`, the exact width is indeterminate at macro evaluation time and so
     /// enforcement of `expected_width` is deferred to compile-time via an assertion in a const
     /// context.
-    pub(crate) fn devise(expected_width: usize, actual_width: Width) -> Self {
+    pub(crate) fn devise(
+        item_ident: &syn::Ident,
+        expected_width: usize,
+        actual_width: Width,
+    ) -> Self {
         match actual_width {
             Width::Met(span, actual_width) => {
                 if expected_width != actual_width {
@@ -54,7 +58,7 @@ impl EnforceItemWidthStrategy {
             Width::Ct(_) => {
                 // We don't have enough information to evaluate `actual_width` at macro evaluation
                 // time, but we can emit Rust code to do so at compile-time.
-                return Self::const_check(expected_width, actual_width);
+                return Self::const_check(item_ident, expected_width, actual_width);
             }
         }
 
@@ -70,13 +74,25 @@ impl EnforceItemWidthStrategy {
     ///     ::core::panicking::panic(/* panic message */);
     /// }
     /// ```
-    fn const_check(expected_width: usize, actual_width: Width) -> Self {
+    fn const_check(item_ident: &syn::Ident, expected_width: usize, actual_width: Width) -> Self {
         let span = actual_width.span();
+
+        let mut error_msg = format!(
+            "width of item `{item_ident}` should be {expected_width} bits but is actually {}",
+            syn::Expr::from(actual_width.parenthesize()).to_token_stream(),
+        );
+        #[cfg(feature = "nightly")]
+        {
+            let span = span.unwrap();
+            let file = span.source_file().path().display();
+            let start = span.start();
+            let (line, column) = (start.line, start.column);
+            error_msg.push_str(&format!("\nthis error originated from {file}, {line}:{column}"));
+        }
 
         let panic_arg = syn::Expr::Lit(syn::ExprLit {
             attrs: vec![],
-            // FIXME: print item ident so the user knows that the heck we're talking about
-            lit: syn::LitStr::new(&format!("item width should be {expected_width}"), span).into(),
+            lit: syn::LitStr::new(&error_msg, span).into(),
         });
         let panic_stmt = syn::Stmt::Expr(
             syn::ExprCall {
@@ -98,7 +114,7 @@ impl EnforceItemWidthStrategy {
             attrs: vec![],
             left: Box::new(expected_width),
             op: syn::BinOp::Ne(syn::Token![!=](span)),
-            right: Box::new(actual_width.into_expr()),
+            right: Box::new(actual_width.parenthesize().into()),
         }
         .into();
 

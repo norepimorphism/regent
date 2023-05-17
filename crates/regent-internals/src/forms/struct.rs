@@ -2,10 +2,9 @@
 
 //! The `bitwise` macro for structs.
 
-mod repr;
 mod field;
 
-use repr::HasRepr as _;
+use field::Represented as _;
 use super::*;
 
 pub(crate) struct Struct;
@@ -18,29 +17,22 @@ impl Form for Struct {
 
         let item_span = item.span();
 
-        // Common tokens with span `item_span`.
-        let brace_token = syn::token::Brace(item_span);
-        let impl_token = syn::Token![impl](item_span);
-        let paren_token = syn::token::Paren(item_span);
-
         // This corresponds to `Output::impl_item`. We will fill the `items` field as we go.
         let mut impl_item = syn::ItemImpl {
             attrs: vec![],
             defaultness: None,
             unsafety: None,
-            impl_token,
+            impl_token: syn::Token![impl](item_span),
             generics: Default::default(),
             trait_: None,
             self_ty: Box::new(type_path!(item.ident.clone())),
-            brace_token,
+            brace_token: syn::token::Brace(item_span),
             items: vec![],
         };
 
         // This is the total bit-width of all fields.
-        let mut item_width = Width::zero(item_span);
+        let mut item_width = Width::Met(item_span, 0);
 
-        // Note: we can use `into_iter` here because we will later replace `item.fields` with a
-        // single field for the item representation.
         for (i, field) in item.fields.into_iter().enumerate() {
             // This is the field type 'as written'.
             let ty = field::Type::parse(field.ty)?;
@@ -48,10 +40,17 @@ impl Form for Struct {
             let width = ty.width();
             // Update the total item width before we forget.
             item_width = Width::add(item_width, width);
-            // This is the API-friendly version of the field type (e.g., `u8` instead of `u5`).
-            let ty = ty.try_into_api_type()?;
 
-            let args = field::Args::parse(&mut field.attrs)?;
+            // This is the API-friendly version of the field type (e.g., `u8` instead of `u5`).
+            let ty = {
+                let span = ty.span();
+
+                ty.try_into_api_type().ok_or_else(|| {
+                    err!(span; "this cannot be made into an API type")
+                })?
+            };
+
+            let attrs = field::Attrs::parse(&mut field.attrs)?;
 
             let span = field.span();
             // This is the `syn::Ident` of the getter method.
@@ -72,20 +71,20 @@ impl Form for Struct {
                     paren_token: syn::token::Paren(span),
                     inputs: Punctuated::new(),
                     variadic: None,
-                    output: syn::ReturnType::Type(syn::Token![->](span), Box::new(ty.into())),
+                    output: syn::ReturnType::Type(syn::Token![->](span), Box::new(ty)),
                 },
                 block: syn::Block { brace_token: syn::token::Brace(span), stmts },
             }
             .into();
 
             let new_glue: syn::Expr;
-            if let Some(constant_value) = args.constant {
+            if let Some(constant_value) = attrs.constant {
                 // This is the simple case for a constant field. We only need to generate a getter
                 // method.
 
-                let decoded = ty.decode(quote!(repr), &field_width);
-                // This is the getter method.
-                let getter = make_getter(true, vec![]);
+                let extract_expr = ty.make_extract_expr(quote!(repr), &field_width);
+                // Add the getter method.
+                impl_item.items.push(make_getter(true, vec![syn::Stmt::Expr(extract_expr, None)]));
                 from_repr_checked_body.extend(quote!({
                     let repr: ItemRepr = repr >> (#field_offset);
                     let actual_value: #field_ty = #field_decoded;
@@ -131,7 +130,9 @@ impl Form for Struct {
         }
 
         let item_repr =
-            uint::RustType::repr_for_item(item_span, &item_width, &mut item.attrs)?;
+            uint::RustType::repr_for_item(item_span, &item_width, &mut item.attrs, |attrs, i| {
+                attrs.remove(i);
+            })?;
 
         item_methods.push(Method {
             sig: quote!(#item_vis fn new(#(#item_new_args),*) -> Self),
@@ -170,48 +171,6 @@ impl Form for Struct {
             .into_token_stream(),
         );
 
-        output.into()
+        Output { item, impl_item, impl_bitwise_for_item }
     }
-}
-
-/// Creates a [`syn::Expr`] that masks the least-significant bits of an expression.
-///
-/// The expression is of the form:
-///
-/// ```no_run
-/// (!0 >> (#repr_width - #width))
-/// ```
-fn make_mask(repr_width: Width, width: Width) -> syn::Expr {
-    let span = self.span();
-
-    let zero_lit = syn::ExprLit { attrs: vec![], lit: syn::LitInt::new("0", span).into() }.into();
-    let lhs_expr = syn::ExprUnary {
-        attrs: vec![],
-        op: syn::UnOp::Not(syn::Token![!](span)),
-        expr: Box::new(zero_lit),
-    }
-    .into();
-
-    let rhs_expr = syn::ExprBinary {
-        attrs: vec![],
-        left: Box::new(repr_width.into_expr()),
-        op: syn::BinOp::Sub(syn::Token![-](span)),
-        right: Box::new(self.into_expr()),
-    }
-    .into();
-
-    syn::ExprParen {
-        attrs: vec![],
-        paren_token: syn::token::Paren(span),
-        expr: Box::new(
-            syn::ExprBinary {
-                attrs: vec![],
-                left: Box::new(lhs_expr),
-                op: syn::BinOp::Shr(syn::Token![>>](span)),
-                right: Box::new(rhs_expr),
-            }
-            .into(),
-        ),
-    }
-    .into()
 }
