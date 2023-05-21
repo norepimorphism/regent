@@ -19,3 +19,6 @@ nightly = []
 [dependencies]
 proc-macro2 = "1.0.53"
 syn = { version = "2.0", features = ["default", "full"] }
+
+[build-dependencies]
+rustc_version = "0.4"

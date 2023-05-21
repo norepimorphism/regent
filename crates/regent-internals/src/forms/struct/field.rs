@@ -4,22 +4,104 @@
 
 use super::*;
 
+/// Models a struct field.
+pub(super) struct Field {
+    /// The width of the corresponding bitfield.
+    pub(super) width: Width,
+    /// The constant value of the corresponding bitfield, if any.
+    pub(super) constant: Option<syn::Expr>,
+    /// The span.
+    pub(super) span: Span2,
+    /// The outer attributes.
+    pub(super) attrs: Vec<syn::Attribute>,
+    /// The visibility.
+    pub(super) vis: syn::Visibility,
+    /// The name of the field.
+    pub(super) ident: syn::Ident,
+    /// The API-compatible type of the field.
+    pub(super) api_ty: syn::Type,
+    /// Produces a [`syn::Expr`] that extracts this field from a struct representation.
+    ///
+    /// # Arguments
+    ///
+    /// The first argument is `repr_width` and specifies the bit-width of the struct
+    /// representation, and the second is `repr_expr`, the expression for the representation
+    /// itself.
+    ///
+    /// This function expects the field to already occupy the least-significant bits of the
+    /// representation (i.e., it has been right-shifted to the position of the field).
+    pub(super) extract: ExtractFn,
+    /// Produces a [`syn::Expr`] that extends this field into its representation.
+    ///
+    /// # Arguments
+    ///
+    /// The first argument is `repr_width` and specifies the bit-width of the struct
+    /// representation, and the second is `field_expr`, the expression for the field (that is
+    /// to be extended).
+    pub(super) extend: ExtendFn,
+}
+
+type ExtractFn = Box<dyn Fn(usize, syn::Expr) -> syn::Expr>;
+type ExtendFn = Box<dyn Fn(usize, syn::Expr) -> syn::Expr>;
+
+impl Field {
+    /// Attempts to parse a `Field` from a [`syn::Field`].
+    ///
+    /// # Arguments
+    ///
+    /// `i` is the index of this field. An index of 0 corresponds to the most-significant field, and
+    /// each subsequent next most-significant field increments the index by one.
+    ///
+    /// `field` is the [`syn::Field`]. This function consumes it by-move.
+    pub(super) fn parse(i: usize, mut field: syn::Field) -> Result<Self> {
+        let span = field.span();
+
+        let pseudo_ty = Type::parse(field.ty)?;
+        let width = pseudo_ty.width();
+        let (extract, extend) = pseudo_ty.extract_extend();
+        let api_ty = {
+            let span = pseudo_ty.span();
+
+            pseudo_ty
+                .try_into_api_type()
+                .ok_or_else(|| err!(span; "this cannot be made into an API type"))?
+        };
+
+        let attrs = Attrs::parse(&mut field.attrs)?;
+        let constant = attrs.constant;
+
+        let ident = field.ident.unwrap_or_else(|| syn::Ident::new(&format!("f{i}"), span));
+
+        Ok(Self {
+            width,
+            constant,
+            span,
+            attrs: field.attrs,
+            vis: field.vis,
+            ident,
+            api_ty,
+            extract,
+            extend,
+        })
+    }
+}
+
 /// Outer attributes on a struct field that are recognized specially by [`bitwise`].
 #[derive(Default)]
-pub(super) struct Attrs {
+struct Attrs {
     /// The value associated with the `#[constant]` attribute, if any.
-    pub(super) constant: Option<syn::Expr>,
+    constant: Option<syn::Expr>,
 }
 
 impl Attrs {
-    /// Parses outer attributes on a struct field.
+    /// Attempts to parse outer attributes on a struct field.
     ///
     /// # Arguments
     ///
     /// `attrs` is a mutably borrowed vector of [`syn::Attribute`]s. Attributes specific to
     /// [`bitwise`] are parsed and then removed from the vector, and all other attributes are
     /// ignored and left as-is.
-    pub(super) fn parse(attrs: &mut Vec<syn::Attribute>) -> Result<Self, Error> {
+    fn parse(attrs: &mut Vec<syn::Attribute>) -> Result<Self> {
         let mut result = Self::default();
 
         let mut i = 0;
@@ -75,12 +157,12 @@ impl Attrs {
     }
 }
 
-/// The type of a struct field.
+/// The type of a struct field 'as written'.
 ///
 /// This type is [spanned](Span2). The associated span can be obtained from the [`span`](Self::span)
 /// method.
 #[derive(Clone)]
-pub(super) enum Type {
+enum Type {
     /// An [element type](ElemType).
     Elem(ElemType),
     /// A tuple of [element types](ElemType).
@@ -97,8 +179,8 @@ pub(super) enum Type {
 }
 
 impl Type {
-    /// Attempts to parse a `Type` from the given [`syn::Type`].
-    pub(super) fn parse(ty: syn::Type) -> Result<Self, Error> {
+    /// Attempts to parse a `Type` from a [`syn::Type`].
+    fn parse(ty: syn::Type) -> Result<Self> {
         match ty {
             syn::Type::Path(elem) => ElemType::parse(elem).map(Self::Elem),
             syn::Type::Tuple(tuple) => Self::parse_tuple(tuple.span(), tuple.elems),
@@ -108,8 +190,8 @@ impl Type {
     }
 
     /// Parses a tuple type.
-    fn parse_tuple(span: Span2, elems: impl IntoIterator<Item = syn::Type>) -> Result<Self, Error> {
-        let elems = elems
+    fn parse_tuple(span: Span2, elems: impl IntoIterator<Item = syn::Type>) -> Result<Self> {
+        let elems: Vec<ElemType> = elems
             .into_iter()
             .map(|elem| {
                 if let syn::Type::Path(elem) = elem {
@@ -118,7 +200,7 @@ impl Type {
                     Err(err!(elem.span(); "tuple element must be a path"))
                 }
             })
-            .collect::<Result<Vec<ElemType>, _>>()?;
+            .collect::<Result<_>>()?;
         if elems.is_empty() {
             return Err(err!(span; "tuple cannot have zero elements"));
         }
@@ -127,7 +209,7 @@ impl Type {
     }
 
     /// Parses an array type.
-    fn parse_array(span: Span2, elem: syn::Type, len: syn::Expr) -> Result<Self, Error> {
+    fn parse_array(span: Span2, elem: syn::Type, len: syn::Expr) -> Result<Self> {
         let syn::Type::Path(elem) = elem else {
             return Err(err!(elem.span(); "array element must be a path"));
         };
@@ -149,7 +231,7 @@ impl Type {
     }
 
     /// The span of this type.
-    pub(super) fn span(&self) -> Span2 {
+    fn span(&self) -> Span2 {
         match self {
             Self::Elem(elem) => elem.span(),
             Self::Tuple(span, _) => *span,
@@ -158,7 +240,7 @@ impl Type {
     }
 
     /// The bit-width of this type.
-    pub(super) fn width(&self) -> Width {
+    fn width(&self) -> Width {
         match self {
             Self::Elem(elem) => elem.width(),
             Self::Tuple(span, elems) => elems
@@ -168,7 +250,7 @@ impl Type {
         }
     }
 
-    pub(super) fn try_into_api_type(self) -> Option<syn::Type> {
+    fn try_into_api_type(self) -> Option<syn::Type> {
         match self {
             Self::Elem(elem) => elem.try_into_api_type(),
             Self::Tuple(span, elems) => elems
@@ -198,7 +280,7 @@ impl Type {
 /// This type is [spanned](Span2). The associated span can be obtained from the [`span`](Self::span)
 /// method.
 #[derive(Clone)]
-pub(super) enum ElemType {
+enum ElemType {
     /// A boolean: `bool`.
     Bool(Span2),
     /// A [`uint::PseudoType`].
@@ -208,8 +290,8 @@ pub(super) enum ElemType {
 }
 
 impl ElemType {
-    /// Attempts to parse an `ElemType` from the given [`syn::TypePath`].
-    pub(super) fn parse(ty: syn::TypePath) -> Result<Self, Error> {
+    /// Attempts to parse an `ElemType` from a [`syn::TypePath`].
+    fn parse(ty: syn::TypePath) -> Result<Self> {
         let span = ty.span();
         if let Some(ident) = ty.path.get_ident() {
             if ident == "bool" {
@@ -226,7 +308,7 @@ impl ElemType {
     }
 
     /// The span of this type.
-    pub(super) fn span(&self) -> Span2 {
+    fn span(&self) -> Span2 {
         match self {
             Self::Bool(span) => *span,
             Self::UInt(span, _) => *span,
@@ -235,7 +317,7 @@ impl ElemType {
     }
 
     /// The bit-width of this type.
-    pub(super) fn width(&self) -> Width {
+    fn width(&self) -> Width {
         match self {
             Self::Bool(span) => Width::Met(*span, 1),
             Self::UInt(span, ty) => Width::Met(*span, ty.width()),
@@ -266,9 +348,9 @@ impl ElemType {
         }
     }
 
-    pub(super) fn try_into_api_type(self) -> Option<syn::Type> {
+    fn try_into_api_type(self) -> Option<syn::Type> {
         match self {
-            Self::Bool(span) => Some(type_path!(span; bool)),
+            Self::Bool(span) => Some(ty_path!(span; bool)),
             Self::UInt(span, mut ty) => {
                 ty.round_up();
                 let ty = ty.try_into_rust_type()?;
@@ -280,576 +362,330 @@ impl ElemType {
     }
 }
 
+trait RepresentedExt {
+    fn extract_extend(&self) -> (ExtractFn, ExtendFn);
+}
+
+impl<T: Represented> RepresentedExt for T {
+    fn extract_extend(&self) -> (ExtractFn, ExtendFn) {
+        todo!()
+    }
+}
+
 /// Types backed by an integral representation.
-pub(super) trait Represented {
-    /// Produces a [`syn::Expr`] to extract a value of this type from a representation.
-    ///
-    /// # Arguments
-    ///
-    /// `repr_width` is the bit-width of the representation. `repr_expr` is an expression that
-    /// expands to the value of the representation.
-    fn make_extract_expr(self, repr_width: Width, repr_expr: syn::Expr) -> syn::Expr;
+trait Represented {
+    fn extract(&self, repr_width: usize, repr_expr: syn::Expr) -> syn::Expr;
 
-    /// Produces a [`syn::Expr`] to extend a value of this type into its representation.
-    ///
-    /// # Arguments
-    ///
-    /// `repr_width` is the bit-width of the representation. `ty_expr` is an expression that expands
-    /// to the value of this type.
-    fn make_extend_expr(self, repr_width: Width, ty_expr: syn::Expr) -> syn::Expr;
+    fn extend(&self, repr_width: usize, field_expr: syn::Expr) -> syn::Expr;
 }
 
-impl Represented for field::Type {
-    fn make_extract_expr(self, repr_width: Width, repr_expr: syn::Expr) -> syn::Expr {
+impl Represented for Type {
+    fn extract(&self, repr_width: usize, repr_expr: syn::Expr) -> syn::Expr {
         match self {
-            Self::Elem(ty) => ty.make_extract_expr(repr_width, repr_expr),
-            _ => unsafe { self.make_extract_container_expr(repr_width, repr_expr) },
-        }
-    }
-
-    fn make_extend_expr(self, repr_width: Width, ty_expr: syn::Expr) -> syn::Expr {
-        match self {
-            Self::Elem(ty) => ty.make_extend_expr(repr_width, ty_expr),
-            _ => unsafe { self.make_extend_container_expr(repr_width, ty_expr) },
-        }
-    }
-}
-
-impl field::Type {
-    /// [`Represented::make_extract_expr`] for container types (tuple and array) only.
-    unsafe fn make_extract_container_expr(self, repr_width: Width, repr_expr: syn::Expr) -> syn::Expr {
-        let span = repr_expr.span();
-
-        // Common identifiers.
-        let elem_ident = syn::Ident::new("elem", span);
-        let get_elem_ident = syn::Ident::new("get_elem", span);
-        let tmp_ident = syn::Ident::new("tmp", span);
-        // Common tokens.
-        let brace_token = syn::token::Brace(span);
-        let bracket_token = syn::token::Bracket(span);
-        let dot_token = syn::Token![.](span);
-        let eq_token = syn::Token![=](span);
-        let let_token = syn::Token![let](span);
-        let or_token = syn::Token![|](span);
-        let paren_token = syn::token::Paren(span);
-        let semi_token = syn::Token![;](span);
-
-        // The strategy is to create a temporary container, formed from block expressions that
-        // continuously bit-shift the next element to the bottom of `repr`, and then feed those
-        // elements, in reverse order, to another container. Reversal is necessary because we take
-        // from the least-significant bits of `repr`, which represent the current last element.
-
-        // This closure produces a `syn::Block` that extracts the next element from a container
-        // type.
-        let get_elem_block = |elem: &field::ElemType| {
-            let elem_width = elem.width();
-
-            // {
-            //     let elem = /* extracted value from #repr_expr */;
-            //     #repr_expr >>= #elem_width;
-            //
-            //     elem
-            // }
-            syn::Block {
-                brace_token,
-                stmts: vec![
-                    syn::Stmt::Local(syn::Local {
+            Self::Elem(elem) => elem.extract(repr_width, repr_expr),
+            Self::Tuple(span, elems) => Self::extract_container(
+                repr_width,
+                repr_expr,
+                elems.iter(),
+                |elems| {
+                    syn::ExprTuple { attrs: vec![], paren_token: syn::token::Paren(*span), elems }
+                        .into()
+                },
+                |expr, i| {
+                    syn::ExprField {
                         attrs: vec![],
-                        let_token,
-                        pat: syn::PatIdent {
-                            attrs: vec![],
-                            by_ref: None,
-                            mutability: None,
-                            ident: elem_ident.clone(),
-                            subpat: None,
-                        }
-                        .into(),
-                        init: Some(syn::LocalInit {
-                            eq_token,
-                            expr: Box::new(elem.make_extract_expr(repr_width, repr_expr.clone())),
-                            diverge: None,
-                        }),
-                        semi_token,
-                    }),
-                    syn::Stmt::Expr(
-                        syn::ExprBinary {
-                            attrs: vec![],
-                            left: Box::new(repr_expr),
-                            op: syn::BinOp::ShrAssign(syn::Token![>>=](span)),
-                            right: Box::new(elem_width.into_expr::<false>()),
-                        }
-                        .into(),
-                        Some(semi_token),
-                    ),
-                    syn::Stmt::Expr(expr_path!(elem_ident), None),
-                ],
-            }
-        };
-        type Elements = Punctuated<syn::Expr, syn::Token![,]>;
-        // This closure produces a 2-tuple containing the local variable representing the
-        // temporary container and an expression that evaluates to the final container, in
-        // that order.
-        fn make_tmp_local_and_elems_expr<Elems>(
-            span: Span2,
-            tmp_ident: syn::Ident,
-            elems: Elems,
-            get_elem_expr: impl Fn(&field::ElemType) -> syn::Expr,
-            make_accessor: impl Fn(usize) -> syn::Expr,
-            make_container: impl Fn(Elements) -> syn::Expr,
-        ) -> (syn::Local, syn::Expr)
-        where
-            Elems: ExactSizeIterator + DoubleEndedIterator,
-            Elems: Iterator<Item = field::ElemType>,
-        {
-            let (tmp_elems, elems): (Elements, Elements) = elems
-                .enumerate()
-                .rev()
-                .map(|(i, elem)| (get_elem_expr(elem), make_accessor(i)))
-                .unzip();
-            // let tmp = /* container */;
-            let tmp_local = syn::Local {
-                attrs: vec![],
-                let_token: syn::Token![let](span),
-                pat: syn::PatIdent {
-                    attrs: vec![],
-                    by_ref: None,
-                    mutability: None,
-                    ident: tmp_ident,
-                    subpat: None,
-                }
-                .into(),
-                init: Some(syn::LocalInit {
-                    eq_token: syn::Token![=](span),
-                    expr: Box::new(make_container(tmp_elems)),
-                    diverge: None,
-                }),
-                semi_token: syn::Token![;](span),
-            };
-            let elems_expr = make_container(elems);
-
-            (tmp_local, elems_expr)
-        }
-
-        match self {
-            Self::Elem(_) => std::hint::unreachable_unchecked(),
-            Self::Tuple(_, elems) => {
-                let (tmp_local, elems_expr) = make_tmp_local_and_elems_expr(
-                    span,
-                    tmp_ident.clone(),
-                    elems.into_iter(),
-                    |elem| {
-                        syn::ExprBlock { attrs: vec![], label: None, block: get_elem_block(elem) }
-                            .into()
-                    },
-                    // tmp.#i
-                    |i| syn::ExprField {
-                        attrs: vec![],
-                        base: Box::new(expr_path!(tmp_ident)),
-                        dot_token,
+                        base: Box::new(expr),
+                        dot_token: syn::Token![.](*span),
                         member: syn::Member::Unnamed(i.into()),
                     }
-                    .into(),
-                    |elems| syn::ExprTuple { attrs: vec![], paren_token, elems }.into(),
-                );
+                    .into()
+                },
+            ),
+            Self::Array { span, elem, len } => Self::extract_container(
+                repr_width,
+                repr_expr,
+                {
+                    // FIXME: it sucks that I can't use `repeat(elem).take(*len)`
 
-                syn::ExprBlock {
-                    attrs: vec![],
-                    label: None,
-                    block: syn::Block {
-                        brace_token,
-                        stmts: vec![syn::Stmt::Local(tmp_local), syn::Stmt::Expr(elems_expr, None)],
-                    },
-                }
-                .into()
-            }
-            Self::Array { span, elem, .. } => {
-                // let get_elem = || #get_elem_block;
-                let get_elem_local = syn::Local {
-                    attrs: vec![],
-                    let_token,
-                    pat: syn::PatIdent {
-                        attrs: vec![],
-                        by_ref: None,
-                        mutability: None,
-                        ident: get_elem_ident,
-                        subpat: None,
+                    struct Iter<'a> {
+                        elem: &'a ElemType,
+                        rem: usize,
                     }
-                    .into(),
-                    init: Some(syn::LocalInit {
-                        eq_token,
-                        expr: Box::new(
-                            syn::ExprClosure {
+
+                    impl<'a> Iterator for Iter<'a> {
+                        type Item = &'a ElemType;
+
+                        fn next(&mut self) -> Option<Self::Item> {
+                            if self.rem == 0 {
+                                return None;
+                            }
+                            self.rem -= 1;
+
+                            Some(self.elem)
+                        }
+
+                        fn size_hint(&self) -> (usize, Option<usize>) {
+                            (self.rem, Some(self.rem))
+                        }
+                    }
+
+                    impl DoubleEndedIterator for Iter<'_> {
+                        fn next_back(&mut self) -> Option<Self::Item> {
+                            self.next()
+                        }
+                    }
+
+                    impl<'a> ExactSizeIterator for Iter<'a> {}
+
+                    Iter { elem, rem: *len }
+                },
+                |elems| {
+                    syn::ExprArray {
+                        attrs: vec![],
+                        bracket_token: syn::token::Bracket(*span),
+                        elems,
+                    }
+                    .into()
+                },
+                |expr, i| {
+                    syn::ExprIndex {
+                        attrs: vec![],
+                        expr: Box::new(expr),
+                        bracket_token: syn::token::Bracket(*span),
+                        index: Box::new(
+                            syn::ExprLit {
                                 attrs: vec![],
-                                lifetimes: None,
-                                constness: None,
-                                movability: None,
-                                asyncness: None,
-                                capture: None,
-                                or1_token: or_token,
-                                inputs: Punctuated::new(),
-                                or2_token: or_token,
-                                output: syn::ReturnType::Default,
-                                body: Box::new(
-                                    syn::ExprBlock {
-                                        attrs: vec![],
-                                        label: None,
-                                        block: get_elem_block(elem),
-                                    }
-                                    .into(),
-                                ),
+                                lit: syn::LitInt::new(&i.to_string(), *span).into(),
                             }
                             .into(),
                         ),
-                        diverge: None,
-                    }),
-                    semi_token,
-                };
-                let (tmp_local, elems_expr) = make_tmp_local_and_elems_expr(
-                    span,
-                    tmp_ident.clone(),
-                    once(elem),
-                    // get_elem()
-                    |elem_ty| syn::ExprCall {
-                        attrs: vec![],
-                        func: Box::new(expr_path!(get_elem_ident)),
-                        paren_token,
-                        args: Punctuated::new(),
                     }
-                    .into(),
-                    |i| {
-                        // tmp.#i
-                        syn::ExprIndex {
-                            attrs: vec![],
-                            expr: Box::new(expr_path!(tmp_ident)),
-                            bracket_token,
-                            index: Box::new(
-                                syn::ExprLit {
-                                    attrs: vec![],
-                                    // FIXME: span
-                                    lit: syn::LitInt::new(&i.to_string(), Span2::call_site())
-                                        .into(),
-                                }
-                                .into(),
-                            ),
-                        }
-                        .into()
-                    },
-                    |elems| syn::ExprArray { attrs: vec![], bracket_token, elems }.into(),
-                );
-
-                // #get_elem_local
-                // #tmp_local
-                // #elems_expr
-                syn::ExprBlock {
-                    attrs: vec![],
-                    label: None,
-                    block: syn::Block {
-                        brace_token,
-                        stmts: vec![
-                            syn::Stmt::Local(get_elem_local),
-                            syn::Stmt::Local(tmp_local),
-                            syn::Stmt::Expr(elems_expr, None),
-                        ],
-                    },
-                }
-                .into()
-            }
+                    .into()
+                },
+            ),
         }
     }
 
-    /// [`Represented::make_extend_expr`] for container types (tuple and array) only.
-    unsafe fn make_extend_container_expr(self, repr_width: Width, ty_expr: syn::Expr) -> syn::Expr {
-        let span = ty_expr.span();
+    fn extend(&self, repr_width: usize, field_expr: syn::Expr) -> syn::Expr {
+        match self {
+            Self::Elem(elem) => elem.extend(repr_width, field_expr),
+            Self::Tuple(span, elems) => Self::extend_container(repr_width, field_expr),
+            Self::Array { span, elem, len } => Self::extend_container(repr_width, field_expr),
+        }
+    }
+}
 
-        // Common identifiers.
-        let repr_ident = syn::Ident::new("repr", span);
-        // Common tokens.
-        let brace_token = syn::token::Brace(span);
-        let bracket_token = syn::token::Bracket(span);
-        let dot_dot_token = syn::Token![..](span);
-        let eq_token = syn::Token![=](span);
-        let for_token = syn::Token![for](span);
-        let in_token = syn::Token![in](span);
-        let let_token = syn::Token![let](span);
-        let semi_token = syn::Token![;](span);
+impl Type {
+    fn extract_container<'a, Elems>(
+        repr_width: usize,
+        repr_expr: syn::Expr,
+        elems: Elems,
+        make_container: impl Fn(Punctuated<syn::Expr, syn::Token![,]>) -> syn::Expr,
+        make_accessor: impl Fn(syn::Expr, usize) -> syn::Expr,
+    ) -> syn::Expr
+    where
+        Elems: Iterator<Item = &'a ElemType>,
+        Elems: DoubleEndedIterator,
+    {
+        let span = repr_expr.span();
 
-        // repr
-        let repr_expr: syn::Expr = expr_path!(repr_ident.clone());
-        // let repr = 0;
-        let repr_local = syn::Local {
+        // let mut repr = #repr_expr;
+        let repr_local = syn::Stmt::Local(syn::Local {
             attrs: vec![],
-            let_token,
+            let_token: syn::Token![let](span),
             pat: syn::PatIdent {
                 attrs: vec![],
                 by_ref: None,
-                mutability: None,
-                ident: repr_ident,
+                mutability: Some(syn::Token![mut](span)),
+                ident: syn::Ident::new("repr", span),
                 subpat: None,
             }
             .into(),
             init: Some(syn::LocalInit {
-                eq_token,
-                expr: Box::new(
-                    syn::ExprLit { attrs: vec![], lit: syn::LitInt::new("0", span).into() }.into(),
-                ),
+                eq_token: syn::Token![=](span),
+                expr: Box::new(repr_expr),
                 diverge: None,
             }),
-            semi_token,
-        };
-        // This closure generates a set of statements that collectively set the next element in a
-        // container type.
-        let set_elem_stmts = |elem: field::ElemType, elem_expr| {
-            let make_stmt = |op, rhs: syn::Expr| {
-                syn::Stmt::Expr(
-                    syn::ExprBinary {
-                        attrs: vec![],
-                        left: Box::new(repr_expr.clone()),
-                        op,
-                        right: Box::new(rhs),
-                    }
-                    .into(),
-                    Some(semi_token),
-                )
-            };
+            semi_token: syn::Token![;](span),
+        });
 
-            // repr <<= #elem_width;
-            // repr |= /* extended value of #elem_expr */;
-            [
-                make_stmt(
-                    syn::BinOp::ShlAssign(syn::Token![<<=](span)),
-                    elem.clone().width().into_expr::<false>(),
-                ),
-                make_stmt(
-                    syn::BinOp::BitOrAssign(syn::Token![|=](span)),
-                    elem.make_extend_expr(repr_width, elem_expr),
-                ),
-            ]
-        };
-
-        match self {
-            Self::Elem(_) => std::hint::unreachable_unchecked(),
-            Self::Tuple(span, elems) => {
-                // #repr_local
-                // #set_elem_stmts
-                // #set_elem_stmts
-                // /* ... */
-                // #repr_expr
-                let stmts = once(syn::Stmt::Local(repr_local))
-                    .chain({
-                        elems
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, elem_ty)| {
-                                // #ty_expr.#i
-                                let elem_expr = syn::ExprField {
-                                    attrs: vec![],
-                                    base: Box::new(ty_expr.clone()),
-                                    dot_token: syn::Token![.](span),
-                                    member: syn::Member::Unnamed(i.into()),
-                                }
-                                .into();
-
-                                set_elem_stmts(elem_ty, elem_expr)
-                            })
-                            .flatten()
-                    })
-                    .chain(once(syn::Stmt::Expr(repr_expr, None)))
-                    .collect();
-
-                syn::ExprBlock {
-                    attrs: vec![],
-                    label: None,
-                    block: syn::Block { brace_token, stmts },
-                }
-                .into()
-            }
-            Self::Array { span, elem, len } => {
-                let i_ident = syn::Ident::new("i", span);
-                // #ty_expr[i]
-                let elem_expr = syn::ExprIndex {
-                    attrs: vec![],
-                    expr: Box::new(ty_expr),
-                    bracket_token,
-                    index: Box::new(expr_path!(i_ident.clone())),
-                }
-                .into();
-                // for i in ..#len {
-                //     #set_elem_stmts
-                // }
-                let for_loop = syn::ExprForLoop {
-                    attrs: vec![],
-                    label: None,
-                    for_token,
-                    pat: Box::new(
-                        syn::PatIdent {
+        let tmp_elems: Punctuated<_, _> = elems
+            .rev()
+            .map(|elem| syn::ExprBlock {
+                attrs: vec![],
+                label: None,
+                block: syn::Block {
+                    brace_token: syn::token::Brace(span),
+                    stmts: vec![
+                        syn::Stmt::Local(syn::Local {
                             attrs: vec![],
-                            by_ref: None,
-                            mutability: None,
-                            ident: i_ident,
-                            subpat: None,
-                        }
-                        .into(),
-                    ),
-                    in_token,
-                    expr: Box::new(
-                        syn::ExprRange {
-                            attrs: vec![],
-                            start: None,
-                            limits: syn::RangeLimits::HalfOpen(dot_dot_token),
-                            end: Some(Box::new(
-                                syn::ExprLit {
-                                    attrs: vec![],
-                                    lit: syn::LitInt::new(&len.to_string(), span).into(),
-                                }
-                                .into(),
-                            )),
-                        }
-                        .into(),
-                    ),
-                    body: syn::Block { brace_token, stmts: set_elem_stmts(elem, elem_expr).into() },
-                }
-                .into();
-                let stmts = vec![
-                    syn::Stmt::Local(repr_local),
-                    syn::Stmt::Expr(for_loop, None),
-                    syn::Stmt::Expr(repr_expr, None),
-                ];
+                            let_token: syn::Token![let](span),
+                            pat: syn::PatIdent {
+                                attrs: vec![],
+                                by_ref: None,
+                                mutability: None,
+                                ident: syn::Ident::new("it", span),
+                                subpat: None,
+                            }
+                            .into(),
+                            init: Some(syn::LocalInit {
+                                eq_token: syn::Token![=](span),
+                                expr: Box::new(elem.extract(repr_width, expr_path!(span; repr))),
+                                diverge: None,
+                            }),
+                            semi_token: syn::Token![;](span),
+                        }),
+                        syn::Stmt::Expr(
+                            syn::ExprBinary {
+                                attrs: vec![],
+                                left: Box::new(expr_path!(span; repr)),
+                                op: syn::BinOp::ShrAssign(syn::Token![>>=](span)),
+                                right: Box::new(elem.width().into()),
+                            }
+                            .into(),
+                            None,
+                        ),
+                        syn::Stmt::Expr(expr_path!(span; it), None),
+                    ],
+                },
+            })
+            .map(syn::Expr::from)
+            .collect();
+        let elems =
+            (0..tmp_elems.len()).rev().map(|i| make_accessor(expr_path!(span; tmp), i)).collect();
 
-                syn::ExprBlock {
-                    attrs: vec![],
-                    label: None,
-                    block: syn::Block { brace_token, stmts },
-                }
-                .into()
+        // let tmp = #tmp_elems;
+        let tmp_local = syn::Stmt::Local(syn::Local {
+            attrs: vec![],
+            let_token: syn::Token![let](span),
+            pat: syn::PatIdent {
+                attrs: vec![],
+                by_ref: None,
+                mutability: None,
+                ident: syn::Ident::new("tmp", span),
+                subpat: None,
             }
+            .into(),
+            init: Some(syn::LocalInit {
+                eq_token: syn::Token![=](span),
+                expr: Box::new(make_container(tmp_elems)),
+                diverge: None,
+            }),
+            semi_token: syn::Token![;](span),
+        });
+        let elems = syn::Stmt::Expr(make_container(elems), None);
+
+        syn::ExprBlock {
+            attrs: vec![],
+            label: None,
+            block: syn::Block {
+                brace_token: syn::token::Brace(span),
+                stmts: vec![repr_local, tmp_local, elems],
+            },
         }
+        .into()
+    }
+
+    fn extend_container(repr_width: usize, field_expr: syn::Expr) -> syn::Expr {
+        todo!()
     }
 }
 
 impl Represented for ElemType {
-    fn make_extract_expr(self, repr_width: Width, repr_expr: syn::Expr) -> syn::Expr {
+    fn extract(&self, repr_width: usize, repr_expr: syn::Expr) -> syn::Expr {
         let span = repr_expr.span();
         let masked = syn::ExprBinary {
             attrs: vec![],
-            left: Box::new(repr_expr),
+            left: Box::new(parenthesize(repr_expr)),
             op: syn::BinOp::BitAnd(syn::Token![&](span)),
-            right: Box::new(mask(repr_width, self.width())),
-        }
-        .into();
+            right: Box::new(mask(Width::Met(span, repr_width), self.width())),
+        };
 
         match self {
-            // #masked == 1
+            // (#masked) == 1
             Self::Bool(_) => syn::ExprBinary {
                 attrs: vec![],
-                left: Box::new(masked),
+                left: Box::new(parenthesize(masked)),
                 op: syn::BinOp::Eq(syn::Token![==](span)),
                 right: Box::new(
                     syn::ExprLit { attrs: vec![], lit: syn::LitInt::new("1", span).into() }.into(),
                 ),
             }
             .into(),
-            // #masked as _
+            // (#masked) as _
             Self::UInt(..) => syn::ExprCast {
                 attrs: vec![],
-                expr: Box::new(masked),
+                expr: Box::new(parenthesize(masked)),
                 as_token: syn::Token![as](span),
                 ty: Box::new(syn::TypeInfer { underscore_token: syn::Token![_](span) }.into()),
             }
             .into(),
             // unsafe { ::regent::Bitwise::from_repr_unchecked(#masked) }
-            Self::ImplBitwise(_) => {
-                let call_expr = syn::ExprCall {
+            Self::ImplBitwise(_) => syn::ExprUnsafe {
+                attrs: vec![],
+                unsafe_token: syn::Token![unsafe](span),
+                block: blockify(syn::ExprCall {
                     attrs: vec![],
                     func: Box::new(expr_path!(span; ::regent::Bitwise::from_repr_unchecked)),
                     paren_token: syn::token::Paren(span),
-                    args: once(masked).collect(),
-                }
-                .into();
-
-                syn::ExprUnsafe {
-                    attrs: vec![],
-                    unsafe_token: syn::Token![unsafe](span),
-                    block: syn::Block {
-                        brace_token: syn::token::Brace(span),
-                        stmts: vec![syn::Stmt::Expr(call_expr, None)],
-                    },
-                }
-                .into()
+                    args: once(syn::Expr::from(masked)).collect(),
+                }),
             }
+            .into(),
         }
     }
 
-    fn make_extend_expr(self, repr_width: Width, ty_expr: syn::Expr) -> syn::Expr {
-        let span = ty_expr.span();
-        let lhs = match self {
-            // ::regent::Bitwise::into_repr(#ty_expr)
+    fn extend(&self, _: usize, field_expr: syn::Expr) -> syn::Expr {
+        let span = field_expr.span();
+
+        match self {
+            // ::regent::Bitwise::into_repr(#field_expr)
             Self::ImplBitwise(_) => syn::ExprCall {
                 attrs: vec![],
                 func: Box::new(expr_path!(span; ::regent::Bitwise::into_repr)),
                 paren_token: syn::token::Paren(span),
-                args: once(ty_expr).collect(),
+                args: once(field_expr).collect(),
             }
             .into(),
-            // #ty_expr as ::regent::Bitwise::Repr
+            // (#field_expr) as ::regent::Bitwise::Repr
             _ => syn::ExprCast {
                 attrs: vec![],
-                expr: Box::new(ty_expr),
+                expr: Box::new(parenthesize(field_expr)),
                 as_token: syn::Token![as](span),
-                ty: Box::new(type_path!(span; ::regent::Bitwise::Repr)),
+                ty: Box::new(ty_path!(span; ::regent::Bitwise::Repr)),
             }
             .into(),
-        };
-        let rhs = mask(repr_width, self.width());
-
-        syn::ExprBinary {
-            attrs: vec![],
-            left: Box::new(lhs),
-            op: syn::BinOp::BitAnd(syn::Token![&](span)),
-            right: Box::new(rhs),
         }
-        .into()
     }
 }
 
-/// Creates a [`syn::Expr`] that masks the least-significant bits of an expression.
-///
-/// The expression is of the form:
+/// Creates a bit-mask of the form:
 ///
 /// ```no_run
 /// (!0 >> (#repr_width - #width))
 /// ```
 fn mask(repr_width: Width, width: Width) -> syn::Expr {
     let span = width.span();
-    let parenthesize = |expr| syn::ExprParen {
-        attrs: vec![],
-        paren_token: syn::token::Paren(span),
-        expr: Box::new(expr),
-    }
-    .into();
 
     let lhs = syn::ExprUnary {
         attrs: vec![],
         op: syn::UnOp::Not(syn::Token![!](span)),
-        expr: Box::new(syn::ExprLit { attrs: vec![], lit: syn::LitInt::new("0", span).into() }.into()),
+        expr: Box::new(
+            syn::ExprLit { attrs: vec![], lit: syn::LitInt::new("0", span).into() }.into(),
+        ),
     }
     .into();
-    let rhs = parenthesize(
-        syn::ExprBinary {
-            attrs: vec![],
-            left: Box::new(repr_width.into_expr::<true>()),
-            op: syn::BinOp::Sub(syn::Token![-](span)),
-            right: Box::new(width.into_expr::<true>()),
-        }
-        .into()
-    );
+    let rhs = parenthesize(syn::ExprBinary {
+        attrs: vec![],
+        left: Box::new(repr_width.parenthesize().into()),
+        op: syn::BinOp::Sub(syn::Token![-](span)),
+        right: Box::new(width.parenthesize().into()),
+    });
 
-    parenthesize(
-        syn::ExprBinary {
-            attrs: vec![],
-            left: Box::new(lhs),
-            op: syn::BinOp::Shr(syn::Token![>>](span)),
-            right: Box::new(rhs),
-        }
-        .into()
-    )
+    parenthesize(syn::ExprBinary {
+        attrs: vec![],
+        left: Box::new(lhs),
+        op: syn::BinOp::Shr(syn::Token![>>](span)),
+        right: Box::new(rhs),
+    })
 }

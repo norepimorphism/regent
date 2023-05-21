@@ -238,18 +238,16 @@ These deficiencies have made C bitfields a common source of frustration for prog
 
 ### Why Regent?
 
-Rust avoided codifying such a controversial feature into the language, leaving the implementation to third-party libraries called *crates*. Regent is one of these crates, and its mission is to combine the intuitive syntax of C bitfields with sane, well-documented behavior.
+Rust avoided codifying such a controversial feature into the language, leaving the implementation to third-party libraries called *crates*. Regent is one of these crates, and its mission is to combine the intuitive syntax of C bitfields with sane, well-documented semantics.
 
 ## Prior Art
 
-<details>
-<summary>A review of existing bitfield implementations.</summary>
-<br>
+Regent is very similar to these other crates. Please check them out!
 
-TODO
-
-</details>
+- [bilge](https://crates.io/crates/bilge)
+- [bitbybit](https://crates.io/crates/bitbybit)
+- [modular-bitfield](https://crates.io/crates/modular-bitfield)
 
 ## Issues
 
-Bug reports, feature requests, and other enhancements are greatly appreciated. Thanks for supporting the project!
+Bug reports, feature requests, and other enhancements are greatly appreciated!

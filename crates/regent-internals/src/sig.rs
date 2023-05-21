@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! A convenience builder for [`syn::Signature`].
+//! A convenience builder for [`syn::Signature`]s.
 
 use super::*;
 
-/// A convenience builder for [`syn::Signature`].
+/// A convenience builder for [`syn::Signature`]s.
 pub(crate) struct Builder {
     is_const: bool,
     is_unsafe: bool,
@@ -33,7 +33,9 @@ impl Builder {
         self
     }
 
-    /// Adds a [receiver](Receiver) argument to the function signature.
+    /// Adds a [receiver] argument to the function signature.
+    ///
+    /// [receiver]: Receiver
     pub(crate) fn with_receiver(mut self, receiver: Receiver) -> Self {
         self.receiver = Some(receiver);
 
@@ -44,11 +46,13 @@ impl Builder {
     ///
     /// # Arguments
     ///
-    /// `span` is the [span](Span2) used for keywords (`const`, `unsafe`, `fn`) and the 'right
-    /// arrow' token `->`. `ident` is the [identifier](syn::Ident) corresponding to the name of the
-    /// function. `get_inputs` and `get_output` are functions that receive the `span` argument
-    /// by-copy and produce the function arguments and return type, respectively, for the resultant
-    /// signature.
+    /// `span` is the [span] used for keywords (`const`, `unsafe`, `fn`) and the 'right arrow' token
+    /// `->`. `ident` is the [identifier] corresponding to the name of the function. `get_inputs`
+    /// and `get_output` are functions that receive the `span` argument by-copy and produce the
+    /// function arguments and return type, respectively, for the resultant signature.
+    ///
+    /// [span]: Span2
+    /// [identifier]: syn::Ident
     pub(crate) fn build<In>(
         self,
         span: Span2,
@@ -68,7 +72,8 @@ impl Builder {
             ident,
             generics: Default::default(),
             paren_token: syn::token::Paren(span),
-            inputs: self.receiver
+            inputs: self
+                .receiver
                 .into_iter()
                 .map(|it| it.into_arg(span))
                 .chain(get_inputs(span).into_iter().map(syn::FnArg::Typed))

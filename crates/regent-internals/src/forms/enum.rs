@@ -9,7 +9,7 @@ pub(crate) struct Enum;
 impl Form for Enum {
     type Item = syn::ItemEnum;
 
-    fn bitwise(mut item: Self::Item) -> Result<Output<Self::Item>, Error> {
+    fn bitwise(mut item: Self::Item) -> Result<Output<Self::Item>> {
         check_generics(&item.generics)?;
 
         // These are the arms of the match expression used to implement
@@ -106,6 +106,7 @@ impl Form for Enum {
             uint::RustType::repr_for_item(item_span, &item_width, &mut item.attrs, |_, _| {
                 has_repr_attr = true;
             })?;
+        // Add a `#[repr]` attribute if there isn't one already.
         if !has_repr_attr {
             item.attrs.push(syn::Attribute {
                 pound_token: syn::Token![#](item_span),
@@ -131,25 +132,16 @@ impl Form for Enum {
         let underscore_token = syn::Token![_](item_span);
         let unsafe_token = syn::Token![unsafe](item_span);
 
-        // This closure wraps the given `syn::Expr` into a `syn::Block`.
-        let make_block_from_expr = |expr| syn::Block {
-            brace_token: syn::token::Brace(item_span),
-            stmts: vec![syn::Stmt::Expr(expr, None)],
-        };
-
         // This is the `from_repr_unchecked` method.
         //
         // This looks like:
         //   ::core::mem::transmute(repr)
-        let from_repr_unchecked = make_block_from_expr(
-            syn::ExprCall {
-                attrs: vec![],
-                func: Box::new(expr_path!(item_span; ::core::mem::transmute)),
-                paren_token,
-                args: once::<syn::Expr>(expr_path!(item_span; repr)).collect(),
-            }
-            .into()
-        );
+        let from_repr_unchecked = syn::ExprCall {
+            attrs: vec![],
+            func: Box::new(expr_path!(item_span; ::core::mem::transmute)),
+            paren_token,
+            args: once::<syn::Expr>(expr_path!(item_span; repr)).collect(),
+        };
 
         // This cryptically-named boolean expresses whether there is a one-to-one correspondence
         // between the set of discriminants in this enum and the set of values allowed by
@@ -164,11 +156,16 @@ impl Form for Enum {
             // Oops---that was a waste.
             drop(from_repr_checked_arms);
 
-            from_repr_unchecked.clone()
+            // ::core::option::Option::Some(#from_repr_unchecked)
+            blockify(syn::ExprCall {
+                attrs: vec![],
+                func: Box::new(expr_path!(item_span; ::core::option::Option::Some)),
+                paren_token,
+                args: once(syn::Expr::from(from_repr_unchecked.clone())).collect(),
+            })
         } else {
             let span = item.variants.span();
-            // This looks like:
-            //   _ => ::core::option::Option::None,
+            // _ => ::core::option::Option::None,
             let wildcard_arm = syn::Arm {
                 attrs: vec![],
                 pat: syn::PatWild { attrs: vec![], underscore_token: syn::Token![_](span) }.into(),
@@ -180,23 +177,21 @@ impl Form for Enum {
             from_repr_checked_arms.push(wildcard_arm);
 
             // match repr { #from_repr_checked_arms }
-            make_block_from_expr(
-                syn::ExprMatch {
-                    attrs: vec![],
-                    match_token,
-                    expr: Box::new(expr_path!(item_span; repr)),
-                    brace_token,
-                    arms: from_repr_checked_arms,
-                }
-                .into()
-            )
+            blockify(syn::ExprMatch {
+                attrs: vec![],
+                match_token,
+                expr: Box::new(expr_path!(item_span; repr)),
+                brace_token,
+                arms: from_repr_checked_arms,
+            })
         };
+        let from_repr_unchecked = blockify(from_repr_unchecked);
 
         // This is the `to_repr` method.
         //
         // This looks like:
         //   unsafe { *(self as *const Self as *const _) }
-        let to_repr = make_block_from_expr({
+        let to_repr = blockify({
             // This closure produces a `syn::Type` of the form `*const #elem`.
             let make_const_ptr = |elem| {
                 syn::TypePtr {
@@ -212,7 +207,7 @@ impl Form for Enum {
                 attrs: vec![],
                 expr: Box::new(expr_path!(item_span; self)),
                 as_token,
-                ty: Box::new(make_const_ptr(type_path!(item_span; Self))),
+                ty: Box::new(make_const_ptr(ty_path!(item_span; Self))),
             }
             .into();
             let self_as_const_infer = syn::ExprCast {
@@ -220,38 +215,25 @@ impl Form for Enum {
                 expr: Box::new(self_as_const_self),
                 as_token,
                 ty: Box::new(make_const_ptr(syn::TypeInfer { underscore_token }.into())),
-            }
-            .into();
+            };
             let deref_expr = syn::ExprUnary {
                 attrs: vec![],
                 op: syn::UnOp::Deref(star_token),
-                expr: Box::new(
-                    syn::ExprParen {
-                        attrs: vec![],
-                        paren_token,
-                        expr: Box::new(self_as_const_infer),
-                    }
-                    .into(),
-                ),
-            }
-            .into();
+                expr: Box::new(parenthesize(self_as_const_infer)),
+            };
 
-            syn::ExprUnsafe { attrs: vec![], unsafe_token, block: make_block_from_expr(deref_expr) }
-                .into()
+            syn::ExprUnsafe { attrs: vec![], unsafe_token, block: blockify(deref_expr) }
         });
         // This is the `into_repr` method.
         //
         // This looks like:
         //   self as _
-        let into_repr = make_block_from_expr(
-            syn::ExprCast {
-                attrs: vec![],
-                expr: Box::new(expr_path!(item_span; self)),
-                as_token,
-                ty: Box::new(syn::TypeInfer { underscore_token }.into()),
-            }
-            .into(),
-        );
+        let into_repr = blockify(syn::ExprCast {
+            attrs: vec![],
+            expr: Box::new(expr_path!(item_span; self)),
+            as_token,
+            ty: Box::new(syn::TypeInfer { underscore_token }.into()),
+        });
 
         let impl_bitwise_for_item = BitwiseImpl {
             ident: item.ident.clone(),
