@@ -71,7 +71,7 @@ impl Form for Enum {
                 .collect(),
             }
             .into();
-            // This looks like:
+            // Rendered:
             //   #discrim_lit => ::core::option::Option::Some(Self::#ident),
             let match_arm = syn::Arm {
                 attrs: vec![],
@@ -100,12 +100,19 @@ impl Form for Enum {
         let item_span = item.span();
         let item_width = Width::Met(item_span, item_width);
 
+        let mut const_ctx = vec![];
         let mut has_repr_attr = false;
         // This is the internal representation, or storage type, of the emitted item.
-        let item_repr =
-            uint::RustType::repr_for_item(item_span, &item_width, &mut item.attrs, |_, _| {
+        let item_repr = uint::RustType::repr_for_item(
+            item_span,
+            &item.ident,
+            &item_width,
+            &mut item.attrs,
+            &mut const_ctx,
+            |_, _| {
                 has_repr_attr = true;
-            })?;
+            },
+        )?;
         // Add a `#[repr]` attribute if there isn't one already.
         if !has_repr_attr {
             item.attrs.push(syn::Attribute {
@@ -242,6 +249,6 @@ impl Form for Enum {
             funcs: BitwiseFuncs { from_repr_unchecked, from_repr_checked, to_repr, into_repr },
         };
 
-        Ok(Output { item, impl_item: None, impl_bitwise_for_item })
+        Ok(Output { const_ctx, item, impl_item: None, impl_bitwise_for_item })
     }
 }

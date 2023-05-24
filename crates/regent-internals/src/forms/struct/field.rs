@@ -1,48 +1,44 @@
 // SPDX-License-Identifier: MPL-2.0
 
 //! Struct fields.
+//!
+//! # Pseudo-types
+//!
+//! This module uses the term 'pseudo-type', or type 'as written', to mean a type permissible in
+//! [`bitwise!`] struct field syntax that may or may not actually exist in Rust. The imaginary `u7`,
+//! `(bool, u2)`, and `[u3; 5]` are all pseudo-types, as are the Rust types `u8`, `(bool, u8)`, and
+//! `[u8; 5]`.
+//!
+//! Pseudo-types are modeled by [`PseudoType`].
+//!
+//! # API Types
+//!
+//! This module uses the term 'API type' to mean an existing Rust type (i.e., expressible as
+//! [`syn::Type`]) that corresponds to a pseudo-type and which can constitute any valid bit pattern
+//! of the pseudo-type. Analogy: if a [`uint::RustType`] is the representation for an emitted item,
+//! then an API type is the representation for a struct field.
+//!
+//! API types are modeled by [`syn::Type`].
 
 use super::*;
 
 /// Models a struct field.
 pub(super) struct Field {
-    /// The width of the corresponding bitfield.
-    pub(super) width: Width,
-    /// The constant value of the corresponding bitfield, if any.
+    /// The value associated with the `#[constant]` attribute, if present.
     pub(super) constant: Option<syn::Expr>,
-    /// The span.
+    /// The span covering the entire field, excluding any trailing comma.
     pub(super) span: Span2,
-    /// The outer attributes.
+    /// The outer attributes, excluding those parsed by [`Attrs::parse`].
     pub(super) attrs: Vec<syn::Attribute>,
     /// The visibility.
     pub(super) vis: syn::Visibility,
-    /// The name of the field.
+    /// The name of the field, or `f{index}` if unnamed.
     pub(super) ident: syn::Ident,
-    /// The API-compatible type of the field.
-    pub(super) api_ty: syn::Type,
-    /// Produces a [`syn::Expr`] that extracts this field from a struct representation.
+    /// The [pseudo-type], or type 'as written'.
     ///
-    /// # Arguments
-    ///
-    /// The first argument is `repr_width` and specifies the bit-width of the struct
-    /// representation, and the second is `repr_expr`, the expression for the representation
-    /// itself.
-    ///
-    /// This function expects the field to already occupy the least-significant bits of the
-    /// representation (i.e., it has been right-shifted to the position of the field).
-    pub(super) extract: ExtractFn,
-    /// Produces a [`syn::Expr`] that extends this field into its representation.
-    ///
-    /// # Arguments
-    ///
-    /// The first argument is `repr_width` and specifies the bit-width of the struct
-    /// representation, and the second is `field_expr`, the expression for the field (that is
-    /// to be extended).
-    pub(super) extend: ExtendFn,
+    /// [pseudo-type]: index.html#pseudo-types
+    pub(super) pseudo_ty: PseudoType,
 }
-
-type ExtractFn = Box<dyn Fn(usize, syn::Expr) -> syn::Expr>;
-type ExtendFn = Box<dyn Fn(usize, syn::Expr) -> syn::Expr>;
 
 impl Field {
     /// Attempts to parse a `Field` from a [`syn::Field`].
@@ -53,43 +49,33 @@ impl Field {
     /// each subsequent next most-significant field increments the index by one.
     ///
     /// `field` is the [`syn::Field`]. This function consumes it by-move.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned if [`field.ty`] fails [`PseudoType::parse`] or [`field.attrs`] fails
+    /// [`Attrs::parse`].
+    ///
+    /// [`field.ty`]: syn::Field::ty
+    /// [`field.attrs`]: syn::Field::attrs
     pub(super) fn parse(i: usize, mut field: syn::Field) -> Result<Self> {
         let span = field.span();
-
-        let pseudo_ty = Type::parse(field.ty)?;
-        let width = pseudo_ty.width();
-        let (extract, extend) = pseudo_ty.extract_extend();
-        let api_ty = {
-            let span = pseudo_ty.span();
-
-            pseudo_ty
-                .try_into_api_type()
-                .ok_or_else(|| err!(span; "this cannot be made into an API type"))?
-        };
-
         let attrs = Attrs::parse(&mut field.attrs)?;
-        let constant = attrs.constant;
-
-        let ident = field.ident.unwrap_or_else(|| syn::Ident::new(&format!("f{i}"), span));
 
         Ok(Self {
-            width,
-            constant,
+            constant: attrs.constant,
             span,
             attrs: field.attrs,
             vis: field.vis,
-            ident,
-            api_ty,
-            extract,
-            extend,
+            ident: field.ident.unwrap_or_else(|| syn::Ident::new(&format!("f{i}"), span)),
+            pseudo_ty: PseudoType::parse(field.ty)?,
         })
     }
 }
 
-/// Outer attributes on a struct field that are recognized specially by [`bitwise`].
+/// Models outer attributes on a struct field that are recognized specially by [`bitwise!`].
 #[derive(Default)]
-struct Attrs {
-    /// The value associated with the `#[constant]` attribute, if any.
+pub(super) struct Attrs {
+    /// The value associated with the `#[constant]` attribute, if present.
     constant: Option<syn::Expr>,
 }
 
@@ -99,13 +85,18 @@ impl Attrs {
     /// # Arguments
     ///
     /// `attrs` is a mutably borrowed vector of [`syn::Attribute`]s. Attributes specific to
-    /// [`bitwise`] are parsed and then removed from the vector, and all other attributes are
+    /// [`bitwise!`] are parsed and then removed from the vector, and all other attributes are
     /// ignored and left as-is.
-    fn parse(attrs: &mut Vec<syn::Attribute>) -> Result<Self> {
+    ///
+    /// # Errors
+    ///
+    /// TODO
+    pub(super) fn parse(attrs: &mut Vec<syn::Attribute>) -> Result<Self> {
         let mut result = Self::default();
 
         let mut i = 0;
         while i < attrs.len() {
+            // FIXME: we can use `Option::get_unchecked`, but we have to be very careful
             let attr = attrs.get(i).unwrap();
             if !attr.path().is_ident("constant") {
                 i += 1;
@@ -140,7 +131,7 @@ impl Attrs {
                     }
                     .into();
 
-                    // This looks like:
+                    // Rendered:
                     //   <_ as ::core::default::Default>::default()
                     syn::ExprCall {
                         attrs: vec![],
@@ -157,45 +148,109 @@ impl Attrs {
     }
 }
 
-/// The type of a struct field 'as written'.
+/// Models the type of [a struct field] 'as written'.
 ///
-/// This type is [spanned](Span2). The associated span can be obtained from the [`span`](Self::span)
-/// method.
+/// This type corresponds to the *&lt;type&gt;* syntactical rule from the struct specification.
+///
+/// This type is [spanned]. The associated span can be obtained from the [`span`] method.
+///
+/// [a struct field]: Field
+/// [spanned]: Span2
+/// [`span`]: Self::Span
 #[derive(Clone)]
-enum Type {
-    /// An [element type](ElemType).
-    Elem(ElemType),
-    /// A tuple of [element types](ElemType).
-    Tuple(Span2, Vec<ElemType>),
-    /// An array of [element types](ElemType).
-    Array {
-        /// The span.
-        span: Span2,
-        /// The element type.
-        elem: ElemType,
-        /// The number of elements.
-        len: usize,
-    },
+pub(super) enum PseudoType {
+    /// An [element type].
+    ///
+    /// [element type]: PseudoElemType
+    Elem(PseudoElemType),
+    /// A [tuple type].
+    ///
+    /// [tuple type]: PseudoTupleType
+    Tuple(PseudoTupleType),
+    /// An [array type].
+    ///
+    /// [array type]: PseudoArrayType
+    Array(PseudoArrayType),
 }
 
-impl Type {
+impl PseudoType {
     /// Attempts to parse a `Type` from a [`syn::Type`].
-    fn parse(ty: syn::Type) -> Result<Self> {
+    ///
+    /// # Errors
+    ///
+    /// An error is returned if `ty` is not [a path], [tuple], or [array], or if one of
+    /// [`PseudoElemType::parse], [`PseudoTupleType::parse`], or [`PseudoArrayType::parse`] fail.
+    ///
+    /// [a path]: syn::TypePath
+    /// [tuple]: syn::TypeTuple
+    /// [array]: syn::TypeArray
+    pub(super) fn parse(ty: syn::Type) -> Result<Self> {
         match ty {
-            syn::Type::Path(elem) => ElemType::parse(elem).map(Self::Elem),
-            syn::Type::Tuple(tuple) => Self::parse_tuple(tuple.span(), tuple.elems),
-            syn::Type::Array(array) => Self::parse_array(array.span(), *array.elem, array.len),
+            syn::Type::Path(elem) => PseudoElemType::parse(elem).map(Self::Elem),
+            syn::Type::Tuple(tuple) => PseudoTupleType::parse(tuple.span(), tuple.elems).map(Self::Tuple),
+            syn::Type::Array(array) => PseudoArrayType::parse(array.span(), *array.elem, array.len).map(Self::Array),
             _ => Err(err!(ty.span(); "field type is not supported")),
         }
     }
 
-    /// Parses a tuple type.
-    fn parse_tuple(span: Span2, elems: impl IntoIterator<Item = syn::Type>) -> Result<Self> {
-        let elems: Vec<ElemType> = elems
+    /// The span of this type.
+    pub(super) fn span(&self) -> Span2 {
+        match self {
+            Self::Elem(ty) => ty.span(),
+            Self::Tuple(ty) => ty.span(),
+            Self::Array(ty) => ty.span(),
+        }
+    }
+
+    /// The bit-width of this type.
+    pub(super) fn width(&self) -> Width {
+        match self {
+            Self::Elem(ty) => ty.width(),
+            Self::Tuple(ty) => ty.width(),
+            Self::Array(ty) => ty.width(),
+        }
+    }
+
+    /// Attempts to convert this into an [API type].
+    ///
+    /// [API Type]: index.html#api-types
+    pub(super) fn try_into_api_type(self) -> Option<syn::Type> {
+        match self {
+            Self::Elem(ty) => ty.try_into_api_type(),
+            Self::Tuple(ty) => ty.try_into_api_type(),
+            Self::Array(ty) => ty.try_into_api_type(),
+        }
+    }
+}
+
+/// A tuple of [element types].
+///
+/// [element types]: PseudoElemType
+#[derive(Clone)]
+pub(super) struct PseudoTupleType {
+    span: Span2,
+    elems: Vec<PseudoElemType>,
+}
+
+impl PseudoTupleType {
+    /// Attempts to parse a `PseudoTupleType` from a sequence of [`syn::Type`]s.
+    ///
+    /// # Arguments
+    ///
+    /// `span` is the span covering the entire tuple (the parentheses and everything between them).
+    /// `elems` is an iterator over the tuple elements in left-to-right order.
+    ///
+    /// # Errors
+    ///
+    /// An error is returned if the `elems` iterator is empty or any element fails [to parse].
+    ///
+    /// [to parse]: PseudoElemType::parse
+    pub(super) fn parse(span: Span2, elems: impl IntoIterator<Item = syn::Type>) -> Result<Self> {
+        let elems: Vec<PseudoElemType> = elems
             .into_iter()
             .map(|elem| {
                 if let syn::Type::Path(elem) = elem {
-                    ElemType::parse(elem)
+                    PseudoElemType::parse(elem)
                 } else {
                     Err(err!(elem.span(); "tuple element must be a path"))
                 }
@@ -205,15 +260,51 @@ impl Type {
             return Err(err!(span; "tuple cannot have zero elements"));
         }
 
-        Ok(Self::Tuple(span, elems))
+        Ok(Self { span, elems })
     }
 
-    /// Parses an array type.
-    fn parse_array(span: Span2, elem: syn::Type, len: syn::Expr) -> Result<Self> {
+    /// The span of this type.
+    pub(super) fn span(&self) -> Span2 {
+        self.span
+    }
+
+    /// The bit-width of this type.
+    pub(super) fn width(&self) -> Width {
+        self.elems.iter().fold(Width::Met(self.span, 0), |acc, elem| Width::add(acc, elem.width()))
+    }
+
+    /// Attempts to convert this into an [API type].
+    ///
+    /// [API Type]: index.html#api-types
+    pub(super) fn try_into_api_type(self) -> Option<syn::Type> {
+        self.elems
+            .into_iter()
+            .map(PseudoElemType::try_into_api_type)
+            .collect::<Option<Punctuated<_, _>>>()
+            .map(|elems| syn::TypeTuple { paren_token: syn::token::Paren(self.span), elems }.into())
+    }
+}
+
+/// An array of [element types].
+///
+/// [element types]: PseudoElemType
+#[derive(Clone)]
+pub(super) struct PseudoArrayType {
+    /// The span.
+    span: Span2,
+    /// The element type.
+    elem: PseudoElemType,
+    /// The number of elements.
+    len: usize,
+}
+
+impl PseudoArrayType {
+    /// Attempts to parse a `PseudoArrayType`.
+    pub(super) fn parse(span: Span2, elem: syn::Type, len: syn::Expr) -> Result<Self> {
         let syn::Type::Path(elem) = elem else {
             return Err(err!(elem.span(); "array element must be a path"));
         };
-        let elem = ElemType::parse(elem)?;
+        let elem = PseudoElemType::parse(elem)?;
         let len = {
             let span = len.span();
             let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(len), .. }) = len else {
@@ -227,60 +318,54 @@ impl Type {
             len
         };
 
-        Ok(Self::Array { span, elem, len })
+        Ok(Self { span, elem, len })
     }
 
     /// The span of this type.
-    fn span(&self) -> Span2 {
-        match self {
-            Self::Elem(elem) => elem.span(),
-            Self::Tuple(span, _) => *span,
-            Self::Array { span, .. } => *span,
-        }
+    pub(super) fn span(&self) -> Span2 {
+        self.span
     }
 
     /// The bit-width of this type.
-    fn width(&self) -> Width {
-        match self {
-            Self::Elem(elem) => elem.width(),
-            Self::Tuple(span, elems) => elems
-                .into_iter()
-                .fold(Width::Met(*span, 0), |acc, elem| Width::add(acc, elem.width())),
-            Self::Array { span, elem, len } => Width::mul(elem.width(), Width::Met(*span, *len)),
-        }
+    pub(super) fn width(&self) -> Width {
+        Width::mul(self.elem.width(), Width::Met(self.span, self.len))
     }
 
-    fn try_into_api_type(self) -> Option<syn::Type> {
-        match self {
-            Self::Elem(elem) => elem.try_into_api_type(),
-            Self::Tuple(span, elems) => elems
-                .into_iter()
-                .map(ElemType::try_into_api_type)
-                .collect::<Option<Punctuated<_, _>>>()
-                .map(|elems| syn::TypeTuple { paren_token: syn::token::Paren(span), elems }.into()),
-            Self::Array { span, elem, len } => elem.try_into_api_type().map(|elem| {
-                syn::TypeArray {
-                    bracket_token: syn::token::Bracket(span),
-                    elem: Box::new(elem.into()),
-                    semi_token: syn::Token![;](span),
-                    len: syn::ExprLit {
-                        attrs: vec![],
-                        lit: syn::LitInt::new(&len.to_string(), span).into(),
-                    }
-                    .into(),
+    /// Attempts to convert this into an [API type].
+    ///
+    /// [API Type]: index.html#api-types
+    pub(super) fn try_into_api_type(self) -> Option<syn::Type> {
+        self.elem.try_into_api_type().map(|elem| {
+            let span = self.span;
+
+            syn::TypeArray {
+                bracket_token: syn::token::Bracket(span),
+                elem: Box::new(elem.into()),
+                semi_token: syn::Token![;](span),
+                len: syn::ExprLit {
+                    attrs: vec![],
+                    lit: syn::LitInt::new(&self.len.to_string(), span).into(),
                 }
-                .into()
-            }),
-        }
+                .into(),
+            }
+            .into()
+        })
     }
 }
 
-/// An inner type in a [tuple](Type::Tuple) or [array](Type::Array).
+/// An inner type in a [tuple] or [array].
 ///
-/// This type is [spanned](Span2). The associated span can be obtained from the [`span`](Self::span)
-/// method.
+/// This is a [pseudo-type].
+///
+/// This type is [spanned]. The associated span can be obtained from the [`span`] method.
+///
+/// [tuple]: PseudoTupleType
+/// [array]: PseudoArrayType
+/// [pseudo-type]: index.html#pseudo-types
+/// [spanned]: Span2
+/// [`span`]: Self::span
 #[derive(Clone)]
-enum ElemType {
+pub(super) enum PseudoElemType {
     /// A boolean: `bool`.
     Bool(Span2),
     /// A [`uint::PseudoType`].
@@ -289,9 +374,9 @@ enum ElemType {
     ImplBitwise(syn::TypePath),
 }
 
-impl ElemType {
-    /// Attempts to parse an `ElemType` from a [`syn::TypePath`].
-    fn parse(ty: syn::TypePath) -> Result<Self> {
+impl PseudoElemType {
+    /// Attempts to parse a `PseudoElemType` from a [`syn::TypePath`].
+    pub(super) fn parse(ty: syn::TypePath) -> Result<Self> {
         let span = ty.span();
         if let Some(ident) = ty.path.get_ident() {
             if ident == "bool" {
@@ -308,7 +393,7 @@ impl ElemType {
     }
 
     /// The span of this type.
-    fn span(&self) -> Span2 {
+    pub(super) fn span(&self) -> Span2 {
         match self {
             Self::Bool(span) => *span,
             Self::UInt(span, _) => *span,
@@ -317,14 +402,14 @@ impl ElemType {
     }
 
     /// The bit-width of this type.
-    fn width(&self) -> Width {
+    pub(super) fn width(&self) -> Width {
         match self {
             Self::Bool(span) => Width::Met(*span, 1),
             Self::UInt(span, ty) => Width::Met(*span, ty.width()),
             Self::ImplBitwise(ty) => Width::Ct({
                 let span = ty.span();
 
-                // This looks like:
+                // Rendered:
                 //   <#ty as :regent::Bitwise>::WIDTH
                 syn::ExprPath {
                     attrs: vec![],
@@ -348,7 +433,10 @@ impl ElemType {
         }
     }
 
-    fn try_into_api_type(self) -> Option<syn::Type> {
+    /// Attempts to convert this into an [API type].
+    ///
+    /// [API Type]: index.html#api-types
+    pub(super) fn try_into_api_type(self) -> Option<syn::Type> {
         match self {
             Self::Bool(span) => Some(ty_path!(span; bool)),
             Self::UInt(span, mut ty) => {
@@ -362,134 +450,55 @@ impl ElemType {
     }
 }
 
-trait RepresentedExt {
-    fn extract_extend(&self) -> (ExtractFn, ExtendFn);
-}
-
-impl<T: Represented> RepresentedExt for T {
-    fn extract_extend(&self) -> (ExtractFn, ExtendFn) {
-        todo!()
-    }
-}
-
-/// Types backed by an integral representation.
-trait Represented {
+/// A field type that is convertible to-and-from the representation type of its owning struct.
+pub(super) trait Represented {
+    /// Produces a [`syn::Expr`] that extracts this field from a representation of its owning
+    /// struct.
+    ///
+    /// # Arguments
+    ///
+    /// `repr_width` specifies the bit-width of the struct representation, and `repr_expr` is the
+    /// expression for the representation itself.
+    ///
+    /// This function expects this field to already occupy the least-significant bits of the
+    /// representation (i.e., the representation has been right-shifted to the position of the
+    /// field).
     fn extract(&self, repr_width: usize, repr_expr: syn::Expr) -> syn::Expr;
 
+    /// Produces a [`syn::Expr`] that zero-extends this field into a representation of its owning
+    /// struct.
+    ///
+    /// # Arguments
+    ///
+    /// `repr_width` specifies the bit-width of the struct representation, and `field_expr` is the
+    /// expression for the field (that is to be zero-extended).
     fn extend(&self, repr_width: usize, field_expr: syn::Expr) -> syn::Expr;
 }
 
-impl Represented for Type {
+impl Represented for PseudoType {
     fn extract(&self, repr_width: usize, repr_expr: syn::Expr) -> syn::Expr {
         match self {
-            Self::Elem(elem) => elem.extract(repr_width, repr_expr),
-            Self::Tuple(span, elems) => Self::extract_container(
-                repr_width,
-                repr_expr,
-                elems.iter(),
-                |elems| {
-                    syn::ExprTuple { attrs: vec![], paren_token: syn::token::Paren(*span), elems }
-                        .into()
-                },
-                |expr, i| {
-                    syn::ExprField {
-                        attrs: vec![],
-                        base: Box::new(expr),
-                        dot_token: syn::Token![.](*span),
-                        member: syn::Member::Unnamed(i.into()),
-                    }
-                    .into()
-                },
-            ),
-            Self::Array { span, elem, len } => Self::extract_container(
-                repr_width,
-                repr_expr,
-                {
-                    // FIXME: it sucks that I can't use `repeat(elem).take(*len)`
-
-                    struct Iter<'a> {
-                        elem: &'a ElemType,
-                        rem: usize,
-                    }
-
-                    impl<'a> Iterator for Iter<'a> {
-                        type Item = &'a ElemType;
-
-                        fn next(&mut self) -> Option<Self::Item> {
-                            if self.rem == 0 {
-                                return None;
-                            }
-                            self.rem -= 1;
-
-                            Some(self.elem)
-                        }
-
-                        fn size_hint(&self) -> (usize, Option<usize>) {
-                            (self.rem, Some(self.rem))
-                        }
-                    }
-
-                    impl DoubleEndedIterator for Iter<'_> {
-                        fn next_back(&mut self) -> Option<Self::Item> {
-                            self.next()
-                        }
-                    }
-
-                    impl<'a> ExactSizeIterator for Iter<'a> {}
-
-                    Iter { elem, rem: *len }
-                },
-                |elems| {
-                    syn::ExprArray {
-                        attrs: vec![],
-                        bracket_token: syn::token::Bracket(*span),
-                        elems,
-                    }
-                    .into()
-                },
-                |expr, i| {
-                    syn::ExprIndex {
-                        attrs: vec![],
-                        expr: Box::new(expr),
-                        bracket_token: syn::token::Bracket(*span),
-                        index: Box::new(
-                            syn::ExprLit {
-                                attrs: vec![],
-                                lit: syn::LitInt::new(&i.to_string(), *span).into(),
-                            }
-                            .into(),
-                        ),
-                    }
-                    .into()
-                },
-            ),
+            Self::Elem(ty) => ty.extract(repr_width, repr_expr),
+            Self::Tuple(ty) => ty.extract(repr_width, repr_expr),
+            Self::Array(ty) => ty.extract(repr_width, repr_expr),
         }
     }
 
     fn extend(&self, repr_width: usize, field_expr: syn::Expr) -> syn::Expr {
         match self {
-            Self::Elem(elem) => elem.extend(repr_width, field_expr),
-            Self::Tuple(span, elems) => Self::extend_container(repr_width, field_expr),
-            Self::Array { span, elem, len } => Self::extend_container(repr_width, field_expr),
+            Self::Elem(ty) => ty.extend(repr_width, field_expr),
+            Self::Tuple(ty) => ty.extend(repr_width, field_expr),
+            Self::Array(ty) => ty.extend(repr_width, field_expr),
         }
     }
 }
 
-impl Type {
-    fn extract_container<'a, Elems>(
-        repr_width: usize,
-        repr_expr: syn::Expr,
-        elems: Elems,
-        make_container: impl Fn(Punctuated<syn::Expr, syn::Token![,]>) -> syn::Expr,
-        make_accessor: impl Fn(syn::Expr, usize) -> syn::Expr,
-    ) -> syn::Expr
-    where
-        Elems: Iterator<Item = &'a ElemType>,
-        Elems: DoubleEndedIterator,
-    {
+impl<T: ContainerType> Represented for T {
+    fn extract(&self, repr_width: usize, repr_expr: syn::Expr) -> syn::Expr {
         let span = repr_expr.span();
 
-        // let mut repr = #repr_expr;
+        // Rendered:
+        //   let mut repr = #repr_expr;
         let repr_local = syn::Stmt::Local(syn::Local {
             attrs: vec![],
             let_token: syn::Token![let](span),
@@ -509,7 +518,7 @@ impl Type {
             semi_token: syn::Token![;](span),
         });
 
-        let tmp_elems: Punctuated<_, _> = elems
+        let tmp_elems: Punctuated<_, _> = self.iter()
             .rev()
             .map(|elem| syn::ExprBlock {
                 attrs: vec![],
@@ -543,7 +552,7 @@ impl Type {
                                 right: Box::new(elem.width().into()),
                             }
                             .into(),
-                            None,
+                            Some(syn::Token![;](span)),
                         ),
                         syn::Stmt::Expr(expr_path!(span; it), None),
                     ],
@@ -552,7 +561,7 @@ impl Type {
             .map(syn::Expr::from)
             .collect();
         let elems =
-            (0..tmp_elems.len()).rev().map(|i| make_accessor(expr_path!(span; tmp), i)).collect();
+            (0..tmp_elems.len()).rev().map(|i| self.make_accessor(i, expr_path!(span; tmp))).collect();
 
         // let tmp = #tmp_elems;
         let tmp_local = syn::Stmt::Local(syn::Local {
@@ -568,12 +577,12 @@ impl Type {
             .into(),
             init: Some(syn::LocalInit {
                 eq_token: syn::Token![=](span),
-                expr: Box::new(make_container(tmp_elems)),
+                expr: Box::new(self.make_container(tmp_elems)),
                 diverge: None,
             }),
             semi_token: syn::Token![;](span),
         });
-        let elems = syn::Stmt::Expr(make_container(elems), None);
+        let elems = syn::Stmt::Expr(self.make_container(elems), None);
 
         syn::ExprBlock {
             attrs: vec![],
@@ -586,12 +595,188 @@ impl Type {
         .into()
     }
 
-    fn extend_container(repr_width: usize, field_expr: syn::Expr) -> syn::Expr {
-        todo!()
+    fn extend(&self, repr_width: usize, field_expr: syn::Expr) -> syn::Expr {
+        let span = field_expr.span();
+
+        let brace_token = syn::token::Brace(span);
+        let let_token = syn::Token![let](span);
+        let mut_token = syn::Token![mut](span);
+        let eq_token = syn::Token![=](span);
+        let or_eq_token = syn::Token![|=](span);
+        let semi_token = syn::Token![;](span);
+        let shl_eq_token = syn::Token![<<=](span);
+
+        // Rendered:
+        //   let mut repr = 0;
+        let repr_local = syn::Stmt::Local(syn::Local {
+            attrs: vec![],
+            let_token,
+            pat: syn::PatIdent {
+                attrs: vec![],
+                by_ref: None,
+                mutability: Some(mut_token),
+                ident: syn::Ident::new("repr", span),
+                subpat: None,
+            }
+            .into(),
+            init: Some(syn::LocalInit {
+                eq_token,
+                expr: Box::new(
+                    syn::ExprLit {
+                        attrs: vec![],
+                        lit: syn::LitInt::new("0", span).into(),
+                    }
+                    .into(),
+                ),
+                diverge: None,
+            }),
+            semi_token,
+        });
+        // Rendered:
+        //   repr
+        let repr_expr = syn::Stmt::Expr(expr_path!(span; repr), None);
+
+        let stmts = once(repr_local).chain(self.iter().enumerate().rev().flat_map(|(i, elem)| [
+            // Rendered:
+            //   repr <<= /* elem.width() */;
+            syn::Stmt::Expr(
+                syn::ExprBinary {
+                    attrs: vec![],
+                    left: Box::new(expr_path!(span; repr)),
+                    op: syn::BinOp::ShlAssign(shl_eq_token),
+                    right: Box::new(elem.width().into()),
+                }
+                .into(),
+                Some(semi_token),
+            ),
+            // Rendered:
+            //   repr |= /* elem.extend() */;
+            syn::Stmt::Expr(
+                syn::ExprBinary {
+                    attrs: vec![],
+                    left: Box::new(expr_path!(span; repr)),
+                    op: syn::BinOp::BitOrAssign(or_eq_token),
+                    right: Box::new(elem.extend(repr_width, self.make_accessor(i, field_expr.clone()))),
+                }
+                .into(),
+                Some(semi_token),
+            ),
+        ]))
+        .chain(once(repr_expr))
+        .collect();
+
+        syn::ExprBlock {
+            attrs: vec![],
+            label: None,
+            block: syn::Block { brace_token, stmts }
+        }
+        .into()
     }
 }
 
-impl Represented for ElemType {
+trait ContainerType {
+    type Elements<'a>: Iterator<Item = &'a PseudoElemType> + DoubleEndedIterator + ExactSizeIterator
+    where
+        Self: 'a;
+
+    fn iter<'a>(&'a self) -> Self::Elements<'a>;
+
+    fn make_container(&self, elems: Punctuated<syn::Expr, syn::Token![,]>) -> syn::Expr;
+
+    fn make_accessor(&self, i: usize, base: syn::Expr) -> syn::Expr;
+}
+
+impl ContainerType for PseudoTupleType {
+    type Elements<'a> = std::slice::Iter<'a, PseudoElemType>;
+
+    fn iter<'a>(&'a self) -> Self::Elements<'a> {
+        self.elems.iter()
+    }
+
+    fn make_container(&self, elems: Punctuated<syn::Expr, syn::Token![,]>) -> syn::Expr {
+        syn::ExprTuple { attrs: vec![], paren_token: syn::token::Paren(self.span), elems }.into()
+    }
+
+    fn make_accessor(&self, i: usize, base: syn::Expr) -> syn::Expr {
+        syn::ExprField {
+            attrs: vec![],
+            base: Box::new(base),
+            dot_token: syn::Token![.](self.span),
+            member: syn::Member::Unnamed(syn::Index {
+                index: u32::try_from(i).unwrap(),
+                span: self.span,
+            }),
+        }
+        .into()
+    }
+}
+
+impl ContainerType for PseudoArrayType {
+    type Elements<'a> = PseudoArrayIter<'a>;
+
+    fn iter<'a>(&'a self) -> Self::Elements<'a> {
+        PseudoArrayIter { elem: &self.elem, rem: self.len }
+    }
+
+    fn make_container(&self, elems: Punctuated<syn::Expr, syn::Token![,]>) -> syn::Expr {
+        syn::ExprArray {
+            attrs: vec![],
+            bracket_token: syn::token::Bracket(self.span),
+            elems,
+        }
+        .into()
+    }
+
+    fn make_accessor(&self, i: usize, base: syn::Expr) -> syn::Expr {
+        syn::ExprIndex {
+            attrs: vec![],
+            expr: Box::new(base),
+            bracket_token: syn::token::Bracket(self.span),
+            index: Box::new(
+                syn::ExprLit {
+                    attrs: vec![],
+                    lit: syn::LitInt::new(&i.to_string(), self.span).into(),
+                }
+                .into(),
+            ),
+        }
+        .into()
+    }
+}
+
+// FIXME: it sucks that I can't use `repeat(elem).take(*len)`
+
+struct PseudoArrayIter<'a> {
+    elem: &'a PseudoElemType,
+    rem: usize,
+}
+
+impl<'a> Iterator for PseudoArrayIter<'a> {
+    type Item = &'a PseudoElemType;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.rem == 0 {
+            return None;
+        }
+        self.rem -= 1;
+
+        Some(self.elem)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.rem, Some(self.rem))
+    }
+}
+
+impl DoubleEndedIterator for PseudoArrayIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.next()
+    }
+}
+
+impl<'a> ExactSizeIterator for PseudoArrayIter<'a> {}
+
+impl Represented for PseudoElemType {
     fn extract(&self, repr_width: usize, repr_expr: syn::Expr) -> syn::Expr {
         let span = repr_expr.span();
         let masked = syn::ExprBinary {
@@ -657,35 +842,4 @@ impl Represented for ElemType {
             .into(),
         }
     }
-}
-
-/// Creates a bit-mask of the form:
-///
-/// ```no_run
-/// (!0 >> (#repr_width - #width))
-/// ```
-fn mask(repr_width: Width, width: Width) -> syn::Expr {
-    let span = width.span();
-
-    let lhs = syn::ExprUnary {
-        attrs: vec![],
-        op: syn::UnOp::Not(syn::Token![!](span)),
-        expr: Box::new(
-            syn::ExprLit { attrs: vec![], lit: syn::LitInt::new("0", span).into() }.into(),
-        ),
-    }
-    .into();
-    let rhs = parenthesize(syn::ExprBinary {
-        attrs: vec![],
-        left: Box::new(repr_width.parenthesize().into()),
-        op: syn::BinOp::Sub(syn::Token![-](span)),
-        right: Box::new(width.parenthesize().into()),
-    });
-
-    parenthesize(syn::ExprBinary {
-        attrs: vec![],
-        left: Box::new(lhs),
-        op: syn::BinOp::Shr(syn::Token![>>](span)),
-        right: Box::new(rhs),
-    })
 }

@@ -9,14 +9,17 @@ use super::*;
 /// In some cases&mdash;such as an enum, or a struct with only `bool` or unsigned integer
 /// fields&mdash;a type's width can be calculated exactly at macro evaluation time (MET). In other
 /// cases, the width depends on information available only at compile-time (CT) of the crate
-/// invoking [`bitwise`].
+/// invoking [`bitwise!`].
 ///
 /// The `Width` enum unifies these cases under a common interface. The most important method is
-/// [`into_expr`](Self::into_expr), which converts a `Width` into a [`syn::Expr`] that evaluates to
-/// a `usize` at compile-time.
+/// [`into_expr`], which converts a `Width` into a [`syn::Expr`] that evaluates to a `usize` at
+/// compile-time.
 ///
-/// This type is [spanned](Span2). The associated span can be obtained from the [`span`](Self::span)
-/// method.
+/// This type is [spanned]. The associated span can be obtained from the [`span`] method.
+///
+/// [`into_expr`]: Self::into_expr
+/// [spanned]: Span2
+/// [`span`]: Self::span
 #[derive(Clone)]
 pub(crate) enum Width {
     /// A width known at macro evaluation time (MET).
@@ -77,25 +80,6 @@ impl Width {
     }
 
     /// Wraps the inner expression in parentheses.
-    ///
-    /// This method is smart: it only parenthesizes in the [`Ct`](Self::Ct) case. This avoids
-    /// unnecessary parentheses (parenthesis-ification?) if the `Width` is [`Met`](Self::Met).
-    ///
-    /// # Examples
-    ///
-    /// Don't do this:
-    ///
-    /// ```
-    /// # let width = Width::Met(Span2::call_site(), 0);
-    /// let expr: syn::Expr = parenthesize(width.into());
-    /// ```
-    ///
-    /// Instead, do this:
-    ///
-    /// ```
-    /// # let width = Width::Met(Span2::call_site(), 0);
-    /// let expr: syn::Expr = width.parenthesize().into();
-    /// ```
     pub(crate) fn parenthesize(self) -> Self {
         match self {
             Self::Ct(expr) => Self::Ct(parenthesize(expr)),

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-//! Implementation details for [Regent](https://crates.io/crates/regent).
+//! Implementation details for [Regent].
 //!
 //! This crate provides the [`bitwise!`] attribute macro that is re-exported by the main *regent*
 //! crate.
+//!
+//! [Regent]: https://crates.io/crates/regent
 
 #![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 #![cfg_attr(feature = "nightly", feature(proc_macro_span))]
@@ -15,7 +17,8 @@ type Result<T> = std::result::Result<T, Error>;
 
 /// The error type returned by fallible functions in *regent-internals*.
 ///
-/// This is a wrapper over [`syn::Error`] and is convertible into [`TokenStream`].
+/// This is a wrapper over [`syn::Error`] and is convertible into [`TokenStream`] via a [`From`]
+/// implementation.
 struct Error(syn::Error);
 
 impl From<Error> for TokenStream {
@@ -28,14 +31,12 @@ impl From<Error> for TokenStream {
 ///
 /// The syntax of this macro is similar to that of [`format!`] except that:
 ///
-/// - [named parameters] are not allowed in the format argument list; and
-/// - the format string may be preceded by a span expression and semicolon ';'.
+/// - [named parameters] (e.g., `var = 5`) are not allowed in the format argument list; and
+/// - the format string may be preceded by a span expression and semicolon (e.g., `span;`).
 ///
 /// The format string and format arguments are passed verbatim to `format!` to produce the error
-/// message.
-///
-/// If specified, the span expression becomes the span of the resultant error. Otherwise,
-/// [`Span2::call_site`] is used.
+/// message. The span of the error message is the span expression, if present, or
+/// [`Span2::call_site`] otherwise.
 ///
 /// [named parameters]: https://doc.rust-lang.org/std/fmt/index.html#named-parameters
 ///
@@ -46,8 +47,8 @@ impl From<Error> for TokenStream {
 /// ```ignore
 /// # fn main() -> Result<(), Error> {
 /// let ident: syn::Ident;
-/// # ident = syn::Ident::new("a", Span2::call_site());
-/// return Err(err!("argument `{ident}` must be an integer literal"))?;
+/// # ident = syn::Ident::new("_", Span2::call_site());
+/// return Err(err!("argument `{ident}` must be an integer literal"));
 /// # }
 /// ```
 ///
@@ -62,13 +63,13 @@ impl From<Error> for TokenStream {
 /// #     attrs: vec![],
 /// #     vis: syn::Visibility::Inherited,
 /// #     enum_token: Default::default(),
-/// #     ident: syn::Ident::new("a", span),
+/// #     ident: syn::Ident::new("_", span),
 /// #     generics: Default::default(),
 /// #     brace_token: Default::default(),
 /// #     variants: Default::default(),
 /// # };
+/// return Err(err!(span; "enum `{}` must have at least one variant", item.ident));
 /// # }
-/// return Err(err!(span; "enum `{}` must have at least one variant", item.ident))?;
 macro_rules! err {
     ($fmt:expr $(, $fmt_arg:expr)* $(,)?) => {
         err!(Span2::call_site(); $fmt $(, $fmt_arg)*)
@@ -94,6 +95,7 @@ macro_rules! err {
 /// ];
 /// ```
 macro_rules! path {
+    // Case for idents and paths without leading colons.
     ($span:expr ; $head_seg:ident $(:: $tail_seg:ident)*) => {
         path!(@internal => {
             span: $span,
@@ -101,6 +103,7 @@ macro_rules! path {
             segments: $head_seg $($tail_seg)*,
         })
     };
+    // Case for paths with leading colons `::`.
     ($span:expr ; :: $head_seg:ident $(:: $tail_seg:ident)*) => {
         path!(@internal => {
             span: $span,
@@ -216,7 +219,7 @@ fn blockify<E: Into<syn::Expr>>(expr: E) -> syn::Block {
 /// - a unary operation (e.g., `!a`); or
 /// - or a `None`-delimited [group],
 ///
-/// it is returned parenthesized. Otherwise, it is returned without modification.
+/// it is parenthesized. Otherwise, it is returned without modification.
 fn parenthesize<E: Into<syn::Expr>>(expr: E) -> syn::Expr {
     let expr = expr.into();
 
@@ -242,6 +245,37 @@ fn parenthesize<E: Into<syn::Expr>>(expr: E) -> syn::Expr {
         expr: Box::new(expr),
     }
     .into()
+}
+
+/// Creates a bit-mask of the form:
+///
+/// ```ignore
+/// (!0 >> (#repr_width - #width))
+/// ```
+fn mask(repr_width: Width, width: Width) -> syn::Expr {
+    let span = width.span();
+
+    let lhs = syn::ExprUnary {
+        attrs: vec![],
+        op: syn::UnOp::Not(syn::Token![!](span)),
+        expr: Box::new(
+            syn::ExprLit { attrs: vec![], lit: syn::LitInt::new("0", span).into() }.into(),
+        ),
+    }
+    .into();
+    let rhs = parenthesize(syn::ExprBinary {
+        attrs: vec![],
+        left: Box::new(repr_width.parenthesize().into()),
+        op: syn::BinOp::Sub(syn::Token![-](span)),
+        right: Box::new(width.parenthesize().into()),
+    });
+
+    parenthesize(syn::ExprBinary {
+        attrs: vec![],
+        left: Box::new(lhs),
+        op: syn::BinOp::Shr(syn::Token![>>](span)),
+        right: Box::new(rhs),
+    })
 }
 
 mod forms;
@@ -290,7 +324,7 @@ pub fn bitwise(args: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Acceptable arguments to the `#[bitwise]` attribute.
+/// Models acceptable arguments to the `#[bitwise]` attribute.
 #[derive(Default)]
 struct Args {
     /// The `size` argument, if present.
@@ -384,6 +418,8 @@ trait Form {
 
 /// The output of [`Form::bitwise`].
 struct Output<Item> {
+    // Statements to be executed in a `const` context at the global scope.
+    const_ctx: Vec<syn::Stmt>,
     /// The emitted item.
     item: Item,
     /// The <code>impl&nbsp;<em>item</em></code> [impl block] for [the emitted item].
@@ -410,13 +446,7 @@ impl<Item: ToTokens> Output<Item> {
     /// [`self.impl_bitwise_for_item.width`][actual width].
     ///
     /// [actual width]: BitwiseImpl::width
-    fn try_into_token_stream(self, expected_width: Option<usize>) -> Result<TokenStream> {
-        // This is an optional item containing a block to be executed in a `const` context at the
-        // global scope.
-        //
-        // When present, this block asserts at compile-time that `expected_width` equals
-        // `self.impl_bitwise_for_item.width`.
-        let mut const_check_item: Option<syn::ItemConst> = None;
+    fn try_into_token_stream(mut self, expected_width: Option<usize>) -> Result<TokenStream> {
         if let Some(expected_width) = expected_width {
             match EnforceItemWidthStrategy::devise(
                 &self.impl_bitwise_for_item.ident,
@@ -428,40 +458,16 @@ impl<Item: ToTokens> Output<Item> {
                 }
                 EnforceItemWidthStrategy::None => {}
                 EnforceItemWidthStrategy::ConstCheck(expr) => {
-                    let span = expr.span();
-                    let unit_ty = syn::TypeTuple {
-                        paren_token: syn::token::Paren(span),
-                        elems: Punctuated::new(),
-                    }
-                    .into();
-                    let block_expr = syn::ExprBlock {
-                        attrs: vec![],
-                        label: None,
-                        block: blockify(expr),
-                    }
-                    .into();
-
-                    // This trick forces `expr` to be evaluated at compile-time.
-                    //
-                    // Rendered:
-                    //   const _: () = { #expr };
-                    const_check_item = Some(syn::ItemConst {
-                        attrs: vec![],
-                        vis: syn::Visibility::Inherited,
-                        const_token: syn::Token![const](span),
-                        ident: syn::Ident::new("_", span),
-                        generics: Default::default(),
-                        colon_token: syn::Token![:](span),
-                        ty: Box::new(unit_ty),
-                        eq_token: syn::Token![=](span),
-                        expr: Box::new(block_expr),
-                        semi_token: syn::Token![;](span),
-                    })
+                    self.const_ctx.push(syn::Stmt::Expr(expr, None));
                 }
             }
         }
 
-        let impl_bitwise_for_item = self.impl_bitwise_for_item.into_item_impl(self.item.span());
+        let item_span = self.item.span();
+        // This is an optional item containing a block to be executed in a `const` context at the
+        // global scope.
+        let const_check_item = Self::make_const_ctx_item(item_span, self.const_ctx);
+        let impl_bitwise_for_item = self.impl_bitwise_for_item.into_item_impl(item_span);
 
         /// Constructs an array of [`TokenStream`]s from the given list of [`ToTokens`]
         /// implementors.
@@ -477,6 +483,47 @@ impl<Item: ToTokens> Output<Item> {
             self.impl_item,
             impl_bitwise_for_item,
         ]))
+    }
+}
+
+impl<Item> Output<Item> {
+    fn make_const_ctx_item(
+        item_span: Span2,
+        const_ctx: Vec<syn::Stmt>,
+    ) -> Option<syn::ItemConst> {
+        let has_const_ctx = !const_ctx.is_empty();
+
+        has_const_ctx.then(|| {
+            let span = item_span;
+            let unit_ty = syn::TypeTuple {
+                paren_token: syn::token::Paren(span),
+                elems: Punctuated::new(),
+            }
+            .into();
+            let expr = syn::ExprBlock {
+                attrs: vec![],
+                label: None,
+                block: syn::Block { brace_token: syn::token::Brace(span), stmts: const_ctx },
+            }
+            .into();
+
+            // Rendered:
+            //   const _: () = {/* self.const_ctx */};
+            //
+            // This trick forces `expr` to be evaluated at compile-time.
+            syn::ItemConst {
+                attrs: vec![],
+                vis: syn::Visibility::Inherited,
+                const_token: syn::Token![const](span),
+                ident: syn::Ident::new("_", span),
+                generics: Default::default(),
+                colon_token: syn::Token![:](span),
+                ty: Box::new(unit_ty),
+                eq_token: syn::Token![=](span),
+                expr: Box::new(expr),
+                semi_token: syn::Token![;](span),
+            }
+        })
     }
 }
 
@@ -551,6 +598,12 @@ impl EnforceItemWidthStrategy {
     /// ```ignore
     /// assert_eq!(#expected_width, #actual_width, /* panic message */)
     /// ```
+    ///
+    /// # Arguments
+    ///
+    /// All arguments are the same as [`devise`].
+    ///
+    /// [`devise`]: Self::devise
     fn const_check(
         item_ident: impl fmt::Display,
         expected_width: usize,
@@ -563,6 +616,7 @@ impl EnforceItemWidthStrategy {
             "width of item `{item_ident}` should be {expected_width} bits but is actually {}",
             actual_width.to_token_stream(),
         );
+        // TODO: remove this nightly feature gate when `proc_macro_span` is stabilized
         #[cfg(feature = "nightly")]
         {
             let span = span.unwrap();
@@ -608,7 +662,9 @@ struct BitwiseImpl {
     ident: syn::Ident,
     /// The bit-width of the implementor.
     width: Width,
-    /// The internal representation, or storage type, of the implementor.
+    /// The [internal representation], or storage type, of the implementor.
+    ///
+    /// [internal representation]: uint::RustType::repr_for_item
     repr: uint::RustType,
     /// The associated function implementations.
     funcs: BitwiseFuncs,

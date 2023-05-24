@@ -15,11 +15,15 @@ macro_rules! impl_display {
     };
 }
 
-/// Models an unsigned integer type of arbitrary bit-width: <code>u&#8239;<em>width</em></code>.
+/// Models a (possibly imaginary) unsigned integer type of arbitrary bit-width:
+/// <code>u&#8239;<em>width</em></code>.
 ///
-/// This type corresponds to the *&lt;uint-type&gt;* syntactical rule from the specification.
+/// This type corresponds to the *&lt;uint-type&gt;* syntactical rule from the struct specification
+/// and can express any unsigned integer type permissible in [`bitwise!`] struct syntax.
 ///
-/// This type is not [spanned](Span2).
+/// This type is not [spanned].
+///
+/// [spanned]: Span2
 #[derive(Clone, Copy)]
 pub(crate) struct PseudoType {
     width: usize,
@@ -136,7 +140,9 @@ impl_display!(PseudoType);
 
 /// Models an unsigned integer primitive that exists in Rust: `u8`, `u16`, `u32`, `u64`, or `u128`.
 ///
-/// This type is not [spanned](Span2).
+/// This type is not [spanned].
+///
+/// [spanned]: Span2
 #[derive(Clone, Copy)]
 pub(crate) struct RustType {
     width: usize,
@@ -147,10 +153,13 @@ impl RustType {
     ///
     /// # Arguments
     ///
-    /// `item_span` is a span covering the entire item. `item_width` is the computed bit-width of
-    /// the item. `item_attrs` is a mutable reference to the outer attributes on the item.
-    /// `handle_repr_attr` is a callback that receives `item_attrs` and the index of the `#[repr]`
-    /// attribute if found.
+    /// - `item_span` is a span covering the entire item.
+    /// - `item_ident` is the name of the item and is used to generate precise error messages.
+    /// - `item_width` is the computed bit-width of the item.
+    /// - `item_attrs` is a mutable reference to the outer attributes on the item.
+    /// - `const_ctx` corresponds to [`Output::const_ctx`].
+    /// - `handle_repr_attr` is a callback that receives `item_attrs` and the index of the `#[repr]`
+    ///   attribute if found.
     ///
     /// # Errors
     ///
@@ -173,8 +182,8 @@ impl RustType {
         item_ident: &syn::Ident,
         item_width: &Width,
         item_attrs: &mut Vec<syn::Attribute>,
-        handle_repr_attr: impl FnOnce(&mut Vec<syn::Attribute>, usize),
         const_ctx: &mut Vec<syn::Stmt>,
+        handle_repr_attr: impl FnOnce(&mut Vec<syn::Attribute>, usize),
     ) -> Result<Self> {
         if let Some((i, attr)) =
             item_attrs.iter().enumerate().find(|(_, attr)| attr.path().is_ident("repr"))
