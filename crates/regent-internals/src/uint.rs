@@ -222,11 +222,8 @@ impl RustType {
                     }
                     .into();
 
-                    let args: Punctuated<syn::Expr, syn::Token![,]> = Punctuated::from_iter([
-                        item_width.clone(),
-                        repr_width,
-                        error_msg,
-                    ]);
+                    let args: Punctuated<syn::Expr, syn::Token![,]> =
+                        Punctuated::from_iter([item_width.clone(), repr_width, error_msg]);
                     let mac = syn::Macro {
                         path: path!(span; assert_eq),
                         bang_token: syn::Token![!](span),

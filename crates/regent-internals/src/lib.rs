@@ -95,7 +95,7 @@ macro_rules! err {
 /// ];
 /// ```
 macro_rules! path {
-    // Case for idents and paths without leading colons.
+    // Case for identifiers and paths without leading colons.
     ($span:expr ; $head_seg:ident $(:: $tail_seg:ident)*) => {
         path!(@internal => {
             span: $span,
@@ -487,19 +487,14 @@ impl<Item: ToTokens> Output<Item> {
 }
 
 impl<Item> Output<Item> {
-    fn make_const_ctx_item(
-        item_span: Span2,
-        const_ctx: Vec<syn::Stmt>,
-    ) -> Option<syn::ItemConst> {
+    fn make_const_ctx_item(item_span: Span2, const_ctx: Vec<syn::Stmt>) -> Option<syn::ItemConst> {
         let has_const_ctx = !const_ctx.is_empty();
 
         has_const_ctx.then(|| {
             let span = item_span;
-            let unit_ty = syn::TypeTuple {
-                paren_token: syn::token::Paren(span),
-                elems: Punctuated::new(),
-            }
-            .into();
+            let unit_ty =
+                syn::TypeTuple { paren_token: syn::token::Paren(span), elems: Punctuated::new() }
+                    .into();
             let expr = syn::ExprBlock {
                 attrs: vec![],
                 label: None,
@@ -629,22 +624,16 @@ impl EnforceItemWidthStrategy {
                 column = start.column,
             ));
         }
-        let error_msg = syn::ExprLit {
-            attrs: vec![],
-            lit: syn::LitStr::new(&error_msg, span).into(),
-        }
-        .into();
+        let error_msg =
+            syn::ExprLit { attrs: vec![], lit: syn::LitStr::new(&error_msg, span).into() }.into();
 
         let expected_width = syn::ExprLit {
             attrs: vec![],
             lit: syn::LitInt::new(&expected_width.to_string(), span).into(),
         }
         .into();
-        let args: Punctuated<syn::Expr, syn::Token![,]> = Punctuated::from_iter([
-            expected_width,
-            actual_width,
-            error_msg,
-        ]);
+        let args: Punctuated<syn::Expr, syn::Token![,]> =
+            Punctuated::from_iter([expected_width, actual_width, error_msg]);
         let mac = syn::Macro {
             path: path!(span; assert_eq),
             bang_token: syn::Token![!](span),

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use rustc_version::{Channel, version_meta};
+use rustc_version::{version_meta, Channel};
 
 fn main() {
     if std::env::var_os("REGENT_NO_NIGHTLY").is_some() {

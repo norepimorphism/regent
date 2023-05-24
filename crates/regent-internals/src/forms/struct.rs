@@ -19,7 +19,6 @@ impl Form for Struct {
         let item_span = item.span();
         // This is the total bit-width of all fields.
         let mut item_width = Width::Met(item_span, 0);
-
         // Pre-process the fields to compute `item_width`.
         let fields: Vec<Field> = item
             .fields
@@ -27,6 +26,8 @@ impl Form for Struct {
             .enumerate()
             .map(|(i, field)| {
                 let field = Field::parse(i, field)?;
+                // FIXME: it sucks that we clone `item_width` here, but alas
+                // `std::mem::replace_with` doesn't exist
                 item_width = Width::add(item_width.clone(), field.pseudo_ty.width());
 
                 Ok(field)
@@ -66,77 +67,66 @@ impl Form for Struct {
         let mut new_fn_args: Vec<syn::PatType> = vec![];
         let mut new_fn_body: Vec<syn::Stmt> = vec![];
 
-        // Process the fields again to fill `impl_item_fns` and `from_repr_checked_body`
+        // Process the fields again to fill `impl_item_fns` and `from_repr_checked_body`.
 
         // This is the bit offset of the field currently being processed.
         //
         // 0 means least-significant.
         let mut field_offset = Width::Met(item_span, 0);
-        for field in fields.into_iter().rev() {
+        for field in fields.into_iter() {
             let span = field.span;
 
-            let and_token = syn::Token![&](span);
-            let and_eq_token = syn::Token![&=](span);
-            let or_eq_token = syn::Token![|=](span);
-            let brace_token = syn::token::Brace(span);
             let dot_token = syn::Token![.](span);
             let eq_token = syn::Token![=](span);
             let if_token = syn::Token![if](span);
             let let_token = syn::Token![let](span);
             let ne_token = syn::Token![!=](span);
-            let not_token = syn::Token![!](span);
+            let or_eq_token = syn::Token![|=](span);
             let return_token = syn::Token![return](span);
             let semi_token = syn::Token![;](span);
-            let shl_token = syn::Token![<<](span);
+            let shl_eq_token = syn::Token![<<=](span);
             let shr_token = syn::Token![>>](span);
 
             let api_ty = {
                 let span = field.pseudo_ty.span();
 
-                field.pseudo_ty
+                field
+                    .pseudo_ty
                     .clone()
                     .try_into_api_type()
                     .ok_or_else(|| err!(span; "this cannot be made into an API type"))?
             };
 
-            // This is the `syn::Ident` of the getter method.
-            let getter_ident = field.ident.clone();
-            // This closure produces a getter method as a `syn::ImplItem`.
-            let make_getter = |is_const: bool, stmts| {
-                syn::ImplItemFn {
-                    attrs: field.attrs,
-                    vis: field.vis.clone(),
-                    defaultness: None,
-                    sig: if is_const {
-                        sig::Builder::new().with_const()
-                    } else {
-                        sig::Builder::new().with_receiver(Receiver::new_ref_self())
-                    }
-                    .build(
-                        span,
-                        getter_ident.clone(),
-                        |_| [],
-                        |_| Some(api_ty.clone()),
-                    ),
-                    block: syn::Block { brace_token, stmts },
-                }
-                .into()
-            };
             let repr_width = item_repr.width();
 
             let new_glue: syn::Expr;
             if let Some(constant) = field.constant {
-                // Add the getter method.
-                impl_item_fns
-                    .push(make_getter(true, vec![syn::Stmt::Expr(constant.clone(), None)]));
+                // Add the getter function.
+                impl_item_fns.push(make_getter_fn(
+                    span,
+                    field.attrs,
+                    field.vis,
+                    true,
+                    field.ident.clone(),
+                    api_ty,
+                    vec![syn::Stmt::Expr(constant.clone(), None)],
+                ));
                 new_glue = constant.clone();
                 // Add to `from_repr_checked_body`.
-                from_repr_checked_body.extend([
-                    // let repr = repr >> #field_offset;
-                    syn::Stmt::Local(syn::Local {
+                if !matches!(field_offset, Width::Met(_, 0)) {
+                    // Rendered:
+                    //   let repr = repr >> (#field_offset);
+                    from_repr_checked_body.push(syn::Stmt::Local(syn::Local {
                         attrs: vec![],
                         let_token,
-                        pat: pat_path!(span; repr),
+                        pat: syn::PatIdent {
+                            attrs: vec![],
+                            by_ref: None,
+                            mutability: None,
+                            ident: syn::Ident::new("repr", span),
+                            subpat: None,
+                        }
+                        .into(),
                         init: Some(syn::LocalInit {
                             eq_token,
                             expr: Box::new(
@@ -151,48 +141,49 @@ impl Form for Struct {
                             diverge: None,
                         }),
                         semi_token,
-                    }),
-                    // if /* extract */ != #constant {
-                    //     return None;
-                    // }
-                    syn::Stmt::Expr(
-                        syn::ExprIf {
-                            attrs: vec![],
-                            if_token,
-                            cond: Box::new(
-                                syn::ExprBinary {
-                                    attrs: vec![],
-                                    left: Box::new(parenthesize(field.pseudo_ty.extract(
-                                        repr_width,
-                                        expr_path!(span; repr),
-                                    ))),
-                                    op: syn::BinOp::Ne(ne_token),
-                                    right: Box::new(constant),
-                                }
-                                .into(),
-                            ),
-                            then_branch: blockify(syn::ExprReturn {
+                    }));
+                }
+                // Rendered:
+                //   if (/* field.pseudo_ty.extract() */) != #constant {
+                //       return None;
+                //   }
+                from_repr_checked_body.push(syn::Stmt::Expr(
+                    syn::ExprIf {
+                        attrs: vec![],
+                        if_token,
+                        cond: Box::new(
+                            syn::ExprBinary {
                                 attrs: vec![],
-                                return_token,
-                                expr: Some(Box::new(
-                                    expr_path!(span; ::core::option::Option::None),
+                                left: Box::new(parenthesize(
+                                    field.pseudo_ty.extract(repr_width, expr_path!(span; repr)),
                                 )),
-                            }),
-                            else_branch: None,
-                        }
-                        .into(),
-                        None,
-                    ),
-                ]);
+                                op: syn::BinOp::Ne(ne_token),
+                                right: Box::new(constant),
+                            }
+                            .into(),
+                        ),
+                        then_branch: blockify(syn::ExprReturn {
+                            attrs: vec![],
+                            return_token,
+                            expr: Some(Box::new(
+                                expr_path!(span; ::core::option::Option::None),
+                            )),
+                        }),
+                        else_branch: None,
+                    }
+                    .into(),
+                    None,
+                ));
             } else {
-                // This is the `syn::Ident` of the setter method.
-                let setter_ident =
-                    syn::Ident::new(&format!("set_{getter_ident}"), getter_ident.span());
-
                 new_glue = field.pseudo_ty.extract(repr_width, expr_path!(span; repr));
-                // Add to `impl_item_fns`.
-                impl_item_fns.push(make_getter(
+                // Add the getter method.
+                impl_item_fns.push(make_getter_fn(
+                    span,
+                    field.attrs,
+                    field.vis.clone(),
                     false,
+                    field.ident.clone(),
+                    api_ty.clone(),
                     vec![syn::Stmt::Expr(
                         field.pseudo_ty.extract(
                             repr_width,
@@ -203,10 +194,7 @@ impl Form for Struct {
                                         attrs: vec![],
                                         base: Box::new(expr_path!(span; self)),
                                         dot_token,
-                                        member: syn::Member::Unnamed(syn::Index {
-                                            index: 0,
-                                            span,
-                                        }),
+                                        member: syn::Member::Unnamed(syn::Index { index: 0, span }),
                                     }
                                     .into(),
                                 ),
@@ -218,94 +206,16 @@ impl Form for Struct {
                         None,
                     )],
                 ));
-                impl_item_fns.push(syn::ImplItemFn {
-                    attrs: vec![],
-                    vis: field.vis,
-                    defaultness: None,
-                    sig: sig::Builder::new().with_receiver(Receiver::new_ref_mut_self()).build(
-                        span,
-                        setter_ident,
-                        |span| [syn::PatType {
-                            attrs: vec![],
-                            pat: Box::new(
-                                syn::PatIdent {
-                                    attrs: vec![],
-                                    by_ref: None,
-                                    mutability: None,
-                                    ident: syn::Ident::new("field", span),
-                                    subpat: None,
-                                }
-                                .into(),
-                            ),
-                            colon_token: syn::Token![:](span),
-                            ty: Box::new(api_ty.clone()),
-                        }],
-                        |_| None,
-                    ),
-                    block: syn::Block {
-                        brace_token: syn::token::Brace(span),
-                        stmts: {
-                            let self_0_expr: syn::Expr = syn::ExprField {
-                                attrs: vec![],
-                                base: Box::new(expr_path!(span; self)),
-                                dot_token,
-                                member: syn::Member::Unnamed(syn::Index {
-                                    index: 0,
-                                    span,
-                                }),
-                            }
-                            .into();
-                            let mask_expr = mask(Width::Met(span, repr_width), field.pseudo_ty.width());
-
-                            vec![
-                                // Rendered:
-                                //   self.0 &= !(#mask_expr << #field_offset);
-                                syn::Stmt::Expr(
-                                    syn::ExprBinary {
-                                        attrs: vec![],
-                                        left: Box::new(self_0_expr.clone()),
-                                        op: syn::BinOp::BitAndAssign(and_eq_token),
-                                        right: Box::new(
-                                            syn::ExprUnary {
-                                                attrs: vec![],
-                                                op: syn::UnOp::Not(not_token),
-                                                expr: Box::new(parenthesize(syn::ExprBinary {
-                                                    attrs: vec![],
-                                                    left: Box::new(mask_expr.clone()),
-                                                    op: syn::BinOp::Shl(shl_token),
-                                                    right: Box::new(field_offset.clone().parenthesize().into()),
-                                                })),
-                                            }
-                                            .into(),
-                                        )
-                                    }
-                                    .into(),
-                                    Some(semi_token),
-                                ),
-                                // Rendered:
-                                //   self.0 |= field & #mask_expr;
-                                syn::Stmt::Expr(
-                                    syn::ExprBinary {
-                                        attrs: vec![],
-                                        left: Box::new(self_0_expr),
-                                        op: syn::BinOp::BitOrAssign(or_eq_token),
-                                        right: Box::new(
-                                            syn::ExprBinary {
-                                                attrs: vec![],
-                                                left: Box::new(expr_path!(span; field)),
-                                                op: syn::BinOp::BitAnd(and_token),
-                                                right: Box::new(mask_expr),
-                                            }
-                                            .into(),
-                                        )
-                                    }
-                                    .into(),
-                                    Some(semi_token),
-                                )
-                            ]
-                        },
-                    },
-                });
+                // Add the setter method.
+                impl_item_fns.push(make_setter_fn(
+                    span,
+                    field.vis.clone(),
+                    &field.ident,
+                    api_ty.clone(),
+                    repr_width,
+                    field.pseudo_ty.width(),
+                    field_offset.clone(),
+                ));
                 // Add to `new_fn_args`.
                 new_fn_args.push(syn::PatType {
                     attrs: vec![],
@@ -324,44 +234,40 @@ impl Form for Struct {
                 });
             }
             // Add to `new_fn_body`.
-            new_fn_body.extend([
+            if !matches!(field_offset, Width::Met(_, 0)) {
                 // Rendered:
-                //   repr <<= #field_width;
-                syn::Stmt::Expr(
+                //   repr <<= /* field.pseudo_ty.width() */;
+                new_fn_body.push(syn::Stmt::Expr(
                     syn::ExprBinary {
                         attrs: vec![],
                         left: Box::new(expr_path!(span; repr)),
-                        op: syn::BinOp::ShlAssign(syn::Token![<<=](span)),
+                        op: syn::BinOp::ShlAssign(shl_eq_token),
                         right: Box::new(field.pseudo_ty.width().into()),
                     }
                     .into(),
-                    Some(syn::Token![;](span)),
-                ),
-                // Rendered:
-                //   repr |= #new_glue;
-                syn::Stmt::Expr(
-                    syn::ExprBinary {
-                        attrs: vec![],
-                        left: Box::new(expr_path!(span; repr)),
-                        op: syn::BinOp::BitOrAssign(syn::Token![|=](span)),
-                        right: Box::new(new_glue),
-                    }
-                    .into(),
-                    Some(syn::Token![;](span)),
-                ),
-            ]);
+                    Some(semi_token),
+                ));
+            }
+            // Rendered:
+            //   repr |= #new_glue;
+            new_fn_body.push(syn::Stmt::Expr(
+                syn::ExprBinary {
+                    attrs: vec![],
+                    left: Box::new(expr_path!(span; repr)),
+                    op: syn::BinOp::BitOrAssign(or_eq_token),
+                    right: Box::new(new_glue),
+                }
+                .into(),
+                Some(semi_token),
+            ));
             // Update `field_offset`.
             field_offset = Width::add(field_offset, field.pseudo_ty.width());
         }
 
         let brace_token = syn::token::Brace(item_span);
         let dot_token = syn::Token![.](item_span);
-        let eq_token = syn::Token![=](item_span);
         let impl_token = syn::Token![impl](item_span);
-        let let_token = syn::Token![let](item_span);
-        let mut_token = syn::Token![mut](item_span);
         let paren_token = syn::token::Paren(item_span);
-        let semi_token = syn::Token![;](item_span);
 
         item.fields = syn::Fields::Unnamed(syn::FieldsUnnamed {
             paren_token,
@@ -377,60 +283,7 @@ impl Form for Struct {
         });
 
         // Add the `new` function.
-        impl_item_fns.push(syn::ImplItemFn {
-            attrs: vec![],
-            vis: item.vis.clone(),
-            defaultness: None,
-            sig: sig::Builder::new().build(
-                item_span,
-                syn::Ident::new("new", item_span),
-                |_| new_fn_args,
-                |span| Some(ty_path!(span; Self)),
-            ),
-            block: syn::Block {
-                brace_token,
-                // Rendered:
-                //   let mut repr = 0;
-                //   #new_fn_body
-                //   Self(repr)
-                stmts: once(syn::Stmt::Local(syn::Local {
-                    attrs: vec![],
-                    let_token,
-                    pat: syn::PatIdent {
-                        attrs: vec![],
-                        by_ref: None,
-                        mutability: Some(mut_token),
-                        ident: syn::Ident::new("repr", item_span),
-                        subpat: None,
-                    }
-                    .into(),
-                    init: Some(syn::LocalInit {
-                        eq_token,
-                        expr: Box::new(
-                            syn::ExprLit {
-                                attrs: vec![],
-                                lit: syn::LitInt::new("0", item_span).into(),
-                            }
-                            .into(),
-                        ),
-                        diverge: None,
-                    }),
-                    semi_token,
-                }))
-                .chain(new_fn_body)
-                .chain(once(syn::Stmt::Expr(
-                    syn::ExprCall {
-                        attrs: vec![],
-                        func: Box::new(expr_path!(item_span; Self)),
-                        paren_token,
-                        args: once::<syn::Expr>(expr_path!(item_span; repr)).collect(),
-                    }
-                    .into(),
-                    None,
-                )))
-                .collect(),
-            },
-        });
+        impl_item_fns.push(make_new_fn(item_span, item.vis.clone(), new_fn_args, new_fn_body));
 
         // We are now ready to build the `Output` type.
 
@@ -499,5 +352,201 @@ impl Form for Struct {
         };
 
         Ok(Output { const_ctx, item, impl_item: Some(impl_item), impl_bitwise_for_item })
+    }
+}
+
+fn make_getter_fn(
+    span: Span2,
+    attrs: Vec<syn::Attribute>,
+    vis: syn::Visibility,
+    is_const: bool,
+    ident: syn::Ident,
+    output: syn::Type,
+    stmts: Vec<syn::Stmt>,
+) -> syn::ImplItemFn {
+    let sig = if is_const {
+        sig::Builder::new().with_const()
+    } else {
+        sig::Builder::new().with_receiver(Receiver::new_ref_self())
+    }
+    .build(span, ident, |_| [], |_| Some(output));
+
+    syn::ImplItemFn {
+        attrs,
+        vis,
+        defaultness: None,
+        sig,
+        block: syn::Block { brace_token: syn::token::Brace(span), stmts },
+    }
+}
+
+fn make_setter_fn(
+    span: Span2,
+    vis: syn::Visibility,
+    ident: &syn::Ident,
+    input: syn::Type,
+    repr_width: usize,
+    field_width: Width,
+    field_offset: Width,
+) -> syn::ImplItemFn {
+    // Common identifiers.
+    let field_ident = syn::Ident::new("field", span);
+    // Common tokens.
+    let and_token = syn::Token![&](span);
+    let and_eq_token = syn::Token![&=](span);
+    let or_eq_token = syn::Token![|=](span);
+    let dot_token = syn::Token![.](span);
+    let not_token = syn::Token![!](span);
+    let semi_token = syn::Token![;](span);
+    let shl_token = syn::Token![<<](span);
+
+    let sig = sig::Builder::new().with_receiver(Receiver::new_ref_mut_self()).build(
+        span,
+        syn::Ident::new(&format!("set_{}", ident), ident.span()),
+        |span| {
+            [syn::PatType {
+                attrs: vec![],
+                pat: Box::new(
+                    syn::PatIdent {
+                        attrs: vec![],
+                        by_ref: None,
+                        mutability: None,
+                        ident: field_ident.clone(),
+                        subpat: None,
+                    }
+                    .into(),
+                ),
+                colon_token: syn::Token![:](span),
+                ty: Box::new(input),
+            }]
+        },
+        |_| None,
+    );
+
+    // Rendered:
+    //   self.0
+    let self_0_expr: syn::Expr = syn::ExprField {
+        attrs: vec![],
+        base: Box::new(expr_path!(span; self)),
+        dot_token,
+        member: syn::Member::Unnamed(syn::Index { index: 0, span }),
+    }
+    .into();
+    let mask_expr = mask(Width::Met(span, repr_width), field_width);
+
+    let mut stmts = vec![];
+    // Rendered:
+    //   self.0 &= !(#mask_expr << (#field_offset));
+    stmts.push(syn::Stmt::Expr(
+        syn::ExprBinary {
+            attrs: vec![],
+            left: Box::new(self_0_expr.clone()),
+            op: syn::BinOp::BitAndAssign(and_eq_token),
+            right: Box::new(
+                syn::ExprUnary {
+                    attrs: vec![],
+                    op: syn::UnOp::Not(not_token),
+                    expr: Box::new(parenthesize(syn::ExprBinary {
+                        attrs: vec![],
+                        left: Box::new(mask_expr.clone()),
+                        op: syn::BinOp::Shl(shl_token),
+                        right: Box::new(field_offset.parenthesize().into()),
+                    })),
+                }
+                .into(),
+            ),
+        }
+        .into(),
+        Some(semi_token),
+    ));
+    // Rendered:
+    //   self.0 |= field & #mask_expr;
+    stmts.push(syn::Stmt::Expr(
+        syn::ExprBinary {
+            attrs: vec![],
+            left: Box::new(self_0_expr),
+            op: syn::BinOp::BitOrAssign(or_eq_token),
+            right: Box::new(
+                syn::ExprBinary {
+                    attrs: vec![],
+                    left: Box::new(expr_path!(field_ident)),
+                    op: syn::BinOp::BitAnd(and_token),
+                    right: Box::new(mask_expr),
+                }
+                .into(),
+            ),
+        }
+        .into(),
+        Some(semi_token),
+    ));
+
+    syn::ImplItemFn {
+        attrs: vec![],
+        vis,
+        defaultness: None,
+        sig,
+        block: syn::Block { brace_token: syn::token::Brace(span), stmts },
+    }
+}
+
+fn make_new_fn(
+    span: Span2,
+    vis: syn::Visibility,
+    args: Vec<syn::PatType>,
+    body: Vec<syn::Stmt>,
+) -> syn::ImplItemFn {
+    let repr_ident = syn::Ident::new("repr", span);
+
+    // Rendered:
+    //   fn new(#args) -> Self
+    let sig = sig::Builder::new().build(
+        span,
+        syn::Ident::new("new", span),
+        |_| args,
+        |span| Some(ty_path!(span; Self)),
+    );
+    // Rendered:
+    //   let mut repr = 0;
+    //   #body
+    //   Self(repr)
+    let stmts = once(syn::Stmt::Local(syn::Local {
+        attrs: vec![],
+        let_token: syn::Token![let](span),
+        pat: syn::PatIdent {
+            attrs: vec![],
+            by_ref: None,
+            mutability: Some(syn::Token![mut](span)),
+            ident: repr_ident.clone(),
+            subpat: None,
+        }
+        .into(),
+        init: Some(syn::LocalInit {
+            eq_token: syn::Token![=](span),
+            expr: Box::new(
+                syn::ExprLit { attrs: vec![], lit: syn::LitInt::new("0", span).into() }.into(),
+            ),
+            diverge: None,
+        }),
+        semi_token: syn::Token![;](span),
+    }))
+    .chain(body)
+    .chain(once(syn::Stmt::Expr(
+        syn::ExprCall {
+            attrs: vec![],
+            func: Box::new(expr_path!(span; Self)),
+            paren_token: syn::token::Paren(span),
+            args: once::<syn::Expr>(expr_path!(repr_ident)).collect(),
+        }
+        .into(),
+        None,
+    )))
+    .collect();
+
+    syn::ImplItemFn {
+        attrs: vec![],
+        vis,
+        defaultness: None,
+        sig,
+        block: syn::Block { brace_token: syn::token::Brace(span), stmts },
     }
 }
