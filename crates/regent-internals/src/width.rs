@@ -36,48 +36,56 @@ impl Width {
             Self::Ct(expr) => expr.span(),
         }
     }
+}
 
-    /// Adds two `Width`s together.
-    ///
-    /// The span of `lhs` becomes the span of the result.
-    pub(crate) fn add(lhs: Self, rhs: Self) -> Self {
-        match (lhs, rhs) {
-            (Self::Met(span, lhs), Self::Met(_, rhs)) => Self::Met(span, lhs + rhs),
-            (lhs, rhs) => {
-                let span = lhs.span();
-                let expr = syn::ExprBinary {
-                    attrs: vec![],
-                    left: Box::new(lhs.into()),
-                    op: syn::BinOp::Add(syn::Token![+](span)),
-                    right: Box::new(rhs.into()),
+macro_rules! impl_bin_op {
+    (
+        docs: $docs:literal,
+        ident: $ident:ident,
+        op_token: $op_token:tt,
+        op_name: $op_name:ident $(,)?
+    ) => {
+        #[doc = $docs]
+        #[doc = "\n\nThe span of `lhs` becomes the span of the result."]
+        pub(crate) fn $ident(lhs: Self, rhs: Self) -> Self {
+            match (lhs, rhs) {
+                (Self::Met(span, lhs), Self::Met(_, rhs)) => Self::Met(span, lhs $op_token rhs),
+                (lhs, rhs) => {
+                    let span = lhs.span();
+                    let expr = syn::ExprBinary {
+                        attrs: vec![],
+                        left: Box::new(lhs.into()),
+                        op: syn::BinOp::$op_name(syn::Token![$op_token](span)),
+                        right: Box::new(rhs.into()),
+                    }
+                    .into();
+
+                    Self::Ct(expr)
                 }
-                .into();
-
-                Self::Ct(expr)
             }
         }
-    }
+    };
+}
 
-    /// Multiplies two `Width`s together.
-    ///
-    /// The span of `lhs` becomes the span of the result.
-    pub(crate) fn mul(lhs: Self, rhs: Self) -> Self {
-        match (lhs, rhs) {
-            (Self::Met(span, lhs), Self::Met(_, rhs)) => Self::Met(span, lhs * rhs),
-            (lhs, rhs) => {
-                let span = lhs.span();
-                let expr = syn::ExprBinary {
-                    attrs: vec![],
-                    left: Box::new(lhs.into()),
-                    op: syn::BinOp::Mul(syn::Token![*](span)),
-                    right: Box::new(rhs.into()),
-                }
-                .into();
-
-                Self::Ct(expr)
-            }
-        }
-    }
+impl Width {
+    impl_bin_op!(
+        docs: "Adds two `Width`s together.",
+        ident: add,
+        op_token: +,
+        op_name: Add,
+    );
+    impl_bin_op!(
+        docs: "Subtracts one `Width` from another.",
+        ident: sub,
+        op_token: -,
+        op_name: Sub,
+    );
+    impl_bin_op!(
+        docs: "Multiplies two `Width`s together.",
+        ident: mul,
+        op_token: *,
+        op_name: Mul,
+    );
 
     /// Wraps the inner expression in parentheses.
     pub(crate) fn parenthesize(self) -> Self {

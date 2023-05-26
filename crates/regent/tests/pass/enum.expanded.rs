@@ -26,7 +26,7 @@ fn main() {
             }
         }
         fn to_repr(&self) -> Self::Repr {
-            unsafe { *(self as *const Self as *const _) }
+            unsafe { ::core::ptr::read(self as *const Self as *const _) }
         }
         fn into_repr(self) -> Self::Repr {
             self as _

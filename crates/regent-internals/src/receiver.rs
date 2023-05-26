@@ -35,21 +35,23 @@ impl Receiver {
 
     /// Converts this into a [`syn::FnArg`] with the given span.
     pub(crate) fn into_arg(self, span: Span2) -> syn::FnArg {
-        let mut_token = self.is_mutable.then_some(syn::Token![mut](span));
+        let mutability = self.is_mutable.then_some(syn::Token![mut](span));
         let self_path = ty_path!(span; Self);
-        let (reference, mutability, ty) = if self.is_borrowed {
+        let (reference, ty) = if self.is_borrowed {
             let and_token = syn::Token![&](span);
+            // Rendered:
+            //   &#mutability Self
             let ty = syn::TypeReference {
                 and_token,
                 lifetime: None,
-                mutability: mut_token,
+                mutability,
                 elem: Box::new(self_path),
             }
             .into();
 
-            (Some((and_token, None)), None, ty)
+            (Some((and_token, None)), ty)
         } else {
-            (None, mut_token, self_path)
+            (None, self_path)
         };
 
         syn::FnArg::Receiver(syn::Receiver {

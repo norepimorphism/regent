@@ -14,7 +14,7 @@ pub(crate) struct Builder {
 impl Builder {
     /// Creates a new `Builder`.
     ///
-    /// At creation, the builder state represents a non-`const`, non-`unsafe` function signature.
+    /// At creation, the builder state models a non-`const`, non-`unsafe` function signature.
     pub(crate) fn new() -> Self {
         Self { is_const: false, is_unsafe: false, receiver: None }
     }
@@ -63,6 +63,17 @@ impl Builder {
     where
         In: IntoIterator<Item = syn::PatType>,
     {
+        let inputs = self
+            .receiver
+            .into_iter()
+            .map(|it| it.into_arg(span))
+            .chain(get_inputs(span).into_iter().map(syn::FnArg::Typed))
+            .collect();
+        let output = match get_output(span) {
+            Some(ty) => syn::ReturnType::Type(syn::Token![->](span), Box::new(ty)),
+            None => syn::ReturnType::Default,
+        };
+
         syn::Signature {
             constness: self.is_const.then_some(syn::Token![const](span)),
             asyncness: None,
@@ -72,17 +83,9 @@ impl Builder {
             ident,
             generics: Default::default(),
             paren_token: syn::token::Paren(span),
-            inputs: self
-                .receiver
-                .into_iter()
-                .map(|it| it.into_arg(span))
-                .chain(get_inputs(span).into_iter().map(syn::FnArg::Typed))
-                .collect(),
+            inputs,
             variadic: None,
-            output: match get_output(span) {
-                Some(ty) => syn::ReturnType::Type(syn::Token![->](span), Box::new(ty)),
-                None => syn::ReturnType::Default,
-            },
+            output,
         }
     }
 }

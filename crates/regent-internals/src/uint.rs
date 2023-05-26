@@ -70,11 +70,8 @@ impl PseudoType {
     /// # Examples
     ///
     /// ```ignore
-    /// let span: Span2;
-    /// # span = Span2::call_site();
-    /// let Some(Ok(mut ty)) = PseudoType::parse(&syn::Ident::new("u37", span)) else {
-    ///     return Err(err!("not an unsigned integer type"));
-    /// }
+    /// let mut ty: PseudoType;
+    /// # ty = PseudoType { width: 37 };
     /// assert_eq!(ty.width(), 37);
     /// ty.round_up();
     /// assert_eq!(ty.width(), 64);
@@ -224,6 +221,8 @@ impl RustType {
 
                     let args: Punctuated<syn::Expr, syn::Token![,]> =
                         Punctuated::from_iter([item_width.clone(), repr_width, error_msg]);
+                    // Rendered:
+                    //   assert_eq!(#args)
                     let mac = syn::Macro {
                         path: path!(span; assert_eq),
                         bang_token: syn::Token![!](span),

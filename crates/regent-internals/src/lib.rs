@@ -7,6 +7,7 @@
 //!
 //! [Regent]: https://crates.io/crates/regent
 
+#![warn(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 #![cfg_attr(feature = "nightly", feature(proc_macro_span))]
 
@@ -143,22 +144,6 @@ macro_rules! expr_path {
     }
 }
 
-/// Creates an implementor of `From<syn::PatPath>`.
-///
-/// This macro offers two syntaxes: one equivalent to [`path!`], and one that accepts an expression
-/// implementing `Into<syn::Path>`.
-///
-/// The output is of the form `syn::PatPath {/* ... */}.into()`. The concrete type of the
-/// expression inferred from context.
-macro_rules! pat_path {
-    ($span:expr ; $($path_piece:tt)*) => {
-        syn::PatPath { attrs: vec![], qself: None, path: path!($span; $($path_piece)*) }.into()
-    };
-    ($path:expr $(,)?) => {
-        syn::PatPath { attrs: vec![], qself: None, path: $path.into() }.into()
-    }
-}
-
 /// Creates an implementor of `From<syn::TypePath>`.
 ///
 /// This macro offers two syntaxes: one equivalent to [`path!`], and one that accepts an expression
@@ -217,9 +202,11 @@ fn blockify<E: Into<syn::Expr>>(expr: E) -> syn::Block {
 /// - a range (e.g., `a..b`);
 /// - a reference (e.g., `&mut x`);
 /// - a unary operation (e.g., `!a`); or
-/// - or a `None`-delimited [group],
+/// - or a [`None`-delimited group],
 ///
 /// it is parenthesized. Otherwise, it is returned without modification.
+///
+/// [`None`-delimited group]: syn::ExprGroup
 fn parenthesize<E: Into<syn::Expr>>(expr: E) -> syn::Expr {
     let expr = expr.into();
 
@@ -233,7 +220,8 @@ fn parenthesize<E: Into<syn::Expr>>(expr: E) -> syn::Expr {
             | syn::Expr::Let(_)
             | syn::Expr::Range(_)
             | syn::Expr::Reference(_)
-            | syn::Expr::Unary(_),
+            | syn::Expr::Unary(_)
+            | syn::Expr::Verbatim(_),
     );
     if !needs_parens {
         return expr;
@@ -247,10 +235,10 @@ fn parenthesize<E: Into<syn::Expr>>(expr: E) -> syn::Expr {
     .into()
 }
 
-/// Creates a bit-mask of the form:
+/// Creates an expression of the form:
 ///
 /// ```ignore
-/// (!0 >> (#repr_width - #width))
+/// ( !0 >> ((#repr_width) - (#width)) )
 /// ```
 fn mask(repr_width: Width, width: Width) -> syn::Expr {
     let span = width.span();
@@ -418,9 +406,15 @@ trait Form {
 
 /// The output of [`Form::bitwise`].
 struct Output<Item> {
-    // Statements to be executed in a `const` context at the global scope.
+    /// Statements to be executed in a `const` context at the global scope.
+    ///
+    /// If present, [`bitwise!`] emits these statements in a `const _: () = {/* ... */}` item. These
+    /// statements typically consist of assertions that uphold invariants which cannot otherwise be
+    /// guaranteed at macro evaluation time.
     const_ctx: Vec<syn::Stmt>,
     /// The emitted item.
+    ///
+    /// This is a `struct` or `enum` item generated from the input item to [`bitwise!`].
     item: Item,
     /// The <code>impl&nbsp;<em>item</em></code> [impl block] for [the emitted item].
     ///
@@ -464,9 +458,7 @@ impl<Item: ToTokens> Output<Item> {
         }
 
         let item_span = self.item.span();
-        // This is an optional item containing a block to be executed in a `const` context at the
-        // global scope.
-        let const_check_item = Self::make_const_ctx_item(item_span, self.const_ctx);
+        let const_ctx_item = Self::make_const_ctx_item(item_span, self.const_ctx);
         let impl_bitwise_for_item = self.impl_bitwise_for_item.into_item_impl(item_span);
 
         /// Constructs an array of [`TokenStream`]s from the given list of [`ToTokens`]
@@ -478,7 +470,7 @@ impl<Item: ToTokens> Output<Item> {
         }
 
         Ok(TokenStream::from_iter(make_token_streams![
-            const_check_item,
+            const_ctx_item,
             self.item,
             self.impl_item,
             impl_bitwise_for_item,
@@ -487,37 +479,50 @@ impl<Item: ToTokens> Output<Item> {
 }
 
 impl<Item> Output<Item> {
+    /// Produces the `const _: () = {/* ... */}` item corresponding to [`const_ctx`].
+    ///
+    /// This function returns `None` if `const_ctx` is [empty].
+    ///
+    /// # Arguments
+    ///
+    /// `item_span` is a span covering the emitted item, and `const_ctx` is [`const_ctx`].
+    ///
+    /// [`const_ctx`]: Self::const_ctx
+    /// [empty]: Vec::is_empty
     fn make_const_ctx_item(item_span: Span2, const_ctx: Vec<syn::Stmt>) -> Option<syn::ItemConst> {
-        let has_const_ctx = !const_ctx.is_empty();
+        if const_ctx.is_empty() {
+            // Nothing to do here.
+            return None;
+        }
 
-        has_const_ctx.then(|| {
-            let span = item_span;
-            let unit_ty =
-                syn::TypeTuple { paren_token: syn::token::Paren(span), elems: Punctuated::new() }
-                    .into();
-            let expr = syn::ExprBlock {
-                attrs: vec![],
-                label: None,
-                block: syn::Block { brace_token: syn::token::Brace(span), stmts: const_ctx },
-            }
-            .into();
+        let span = item_span;
+        // Rendered:
+        //   ()
+        let unit_ty =
+            syn::TypeTuple { paren_token: syn::token::Paren(span), elems: Punctuated::new() }
+                .into();
+        // Rendered:
+        //   { #const_ctx }
+        let block_expr = syn::ExprBlock {
+            attrs: vec![],
+            label: None,
+            block: syn::Block { brace_token: syn::token::Brace(span), stmts: const_ctx },
+        }
+        .into();
 
-            // Rendered:
-            //   const _: () = {/* self.const_ctx */};
-            //
-            // This trick forces `expr` to be evaluated at compile-time.
-            syn::ItemConst {
-                attrs: vec![],
-                vis: syn::Visibility::Inherited,
-                const_token: syn::Token![const](span),
-                ident: syn::Ident::new("_", span),
-                generics: Default::default(),
-                colon_token: syn::Token![:](span),
-                ty: Box::new(unit_ty),
-                eq_token: syn::Token![=](span),
-                expr: Box::new(expr),
-                semi_token: syn::Token![;](span),
-            }
+        // Rendered:
+        //   const _: #unit_ty = #block_expr;
+        Some(syn::ItemConst {
+            attrs: vec![],
+            vis: syn::Visibility::Inherited,
+            const_token: syn::Token![const](span),
+            ident: syn::Ident::new("_", span),
+            generics: Default::default(),
+            colon_token: syn::Token![:](span),
+            ty: Box::new(unit_ty),
+            eq_token: syn::Token![=](span),
+            expr: Box::new(block_expr),
+            semi_token: syn::Token![;](span),
         })
     }
 }
@@ -605,11 +610,10 @@ impl EnforceItemWidthStrategy {
         actual_width: syn::Expr,
     ) -> Self {
         let span = actual_width.span();
-        let actual_width = parenthesize(actual_width);
 
         let mut error_msg = format!(
             "width of item `{item_ident}` should be {expected_width} bits but is actually {}",
-            actual_width.to_token_stream(),
+            parenthesize(actual_width.clone()).into_token_stream(),
         );
         // TODO: remove this nightly feature gate when `proc_macro_span` is stabilized
         #[cfg(feature = "nightly")]
@@ -634,6 +638,8 @@ impl EnforceItemWidthStrategy {
         .into();
         let args: Punctuated<syn::Expr, syn::Token![,]> =
             Punctuated::from_iter([expected_width, actual_width, error_msg]);
+        // Rendered:
+        //   assert_eq!(#args)
         let mac = syn::Macro {
             path: path!(span; assert_eq),
             bang_token: syn::Token![!](span),
@@ -645,7 +651,8 @@ impl EnforceItemWidthStrategy {
     }
 }
 
-/// An implementation of the `Bitwise` trait.
+/// Models an implementation of the `Bitwise` trait:
+/// <code>impl&nbsp;::regent::Bitwise&nbsp;for&nbsp;<em>item</em>&nbsp;{/*&nbsp;...&nbsp;*/}</code>.
 struct BitwiseImpl {
     /// The name of the implementor.
     ident: syn::Ident,
@@ -727,7 +734,7 @@ impl BitwiseImpl {
     }
 }
 
-/// Associated function implementations for the `Bitwise` trait.
+/// Models associated function implementations for the `Bitwise` trait.
 ///
 /// This struct consists of [`syn::Block`]s rather than [`syn::ItemFn`]s because the function
 /// signatures can be inferred from context.
@@ -773,22 +780,33 @@ impl BitwiseFuncs {
 
         /// Produces a [`syn::PatType`] of the form `repr: Self::Repr` with the given span.
         fn make_repr_arg(span: Span2) -> syn::PatType {
+            let repr_pat = syn::PatIdent {
+                attrs: vec![],
+                by_ref: None,
+                mutability: None,
+                ident: syn::Ident::new("repr", span),
+                subpat: None,
+            }
+            .into();
+
             syn::PatType {
                 attrs: vec![],
-                pat: Box::new(pat_path!(span; repr)),
+                pat: Box::new(repr_pat),
                 colon_token: syn::Token![:](span),
                 ty: Box::new(ty_path!(span; Self::Repr)),
             }
         }
 
-        /// Produces a [`syn::Type`] of the form `::core::option::Option::<Self>` with the given
+        /// Produces a [`syn::Type`] of the form `::core::option::Option<Self>` with the given
         /// span.
         fn make_option_self_ty(span: Span2) -> syn::Type {
+            // Rendered:
+            //   Option<Self>
             let tail = syn::PathSegment {
                 ident: syn::Ident::new("Option", span),
                 arguments: syn::PathArguments::AngleBracketed(
                     syn::AngleBracketedGenericArguments {
-                        colon2_token: Some(syn::Token![::](span)),
+                        colon2_token: None,
                         lt_token: syn::Token![<](span),
                         args: once(syn::GenericArgument::Type(ty_path!(span; Self))).collect(),
                         gt_token: syn::Token![>](span),
@@ -818,7 +836,7 @@ impl BitwiseFuncs {
                 block: from_repr_unchecked,
             },
             // Rendered:
-            //   fn from_repr_checked(repr: Self::Repr) -> ::core::option::Option::<Self>
+            //   fn from_repr_checked(repr: Self::Repr) -> ::core::option::Option<Self>
             make_fn! {
                 builder: sig::Builder::new(),
                 inputs: |span| [make_repr_arg(span)],
