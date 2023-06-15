@@ -24,7 +24,14 @@ use super::*;
 
 /// Models a struct field.
 pub(super) struct Field {
+    /// The index of this field.
+    ///
+    /// This corresponds to the `i` argument of [`Field::parse`].
+    pub(super) index: usize,
+    pub(super) offset: Width,
     /// The value associated with the `#[constant]` attribute, if present.
+    ///
+    /// This corresponds to [`Attrs::constant`].
     pub(super) constant: Option<syn::Expr>,
     /// The span covering the entire field, excluding any trailing comma.
     pub(super) span: Span2,
@@ -38,6 +45,10 @@ pub(super) struct Field {
     ///
     /// [pseudo-type]: index.html#pseudo-types
     pub(super) pseudo_ty: PseudoType,
+    /// The [API type].
+    ///
+    /// [API type]: index.html#api-types
+    pub(super) api_ty: syn::Type,
 }
 
 impl Field {
@@ -52,23 +63,194 @@ impl Field {
     ///
     /// # Errors
     ///
-    /// An error is returned if [`field.ty`] fails [`PseudoType::parse`] or [`field.attrs`] fails
-    /// [`Attrs::parse`].
+    /// An error is returned if [`field.ty`] fails [`PseudoType::parse`], the resultant pseudo-type
+    /// fails [`try_into_api_type`], or [`field.attrs`] fails [`Attrs::parse`].
     ///
     /// [`field.ty`]: syn::Field::ty
+    /// [`try_into_api_type`]: PseudoType::try_into_api_type
     /// [`field.attrs`]: syn::Field::attrs
-    pub(super) fn parse(i: usize, mut field: syn::Field) -> Result<Self> {
+    pub(super) fn parse(i: usize, offset: &mut Width, mut field: syn::Field) -> Result<Self> {
         let span = field.span();
         let attrs = Attrs::parse(&mut field.attrs)?;
+        let pseudo_ty = PseudoType::parse(field.ty)?;
+        let api_ty = pseudo_ty
+            .clone()
+            .try_into_api_type()
+            .ok_or_else(|| err!(pseudo_ty.span(); "this cannot be made into an API type"))?;
 
         Ok(Self {
+            index: i,
+            offset: {
+                let it = offset.clone();
+                *offset = Width::add(offset.clone(), pseudo_ty.width());
+
+                it
+            },
             constant: attrs.constant,
             span,
             attrs: field.attrs,
             vis: field.vis,
             ident: field.ident.unwrap_or_else(|| syn::Ident::new(&format!("f{i}"), span)),
-            pseudo_ty: PseudoType::parse(field.ty)?,
+            pseudo_ty,
+            api_ty,
         })
+    }
+
+    pub(super) fn make_setter_fn(&self, repr_width: usize) -> syn::ImplItemFn {
+        let span = self.span;
+        let field_ident = syn::Ident::new("field", span);
+
+        // Rendered:
+        //   field: /* self.api_ty */
+        let arg = syn::PatType {
+            attrs: vec![],
+            pat: Box::new(
+                syn::PatIdent {
+                    attrs: vec![],
+                    by_ref: None,
+                    mutability: None,
+                    ident: field_ident.clone(),
+                    subpat: None,
+                }
+                .into(),
+            ),
+            colon_token: syn::Token![:](span),
+            ty: Box::new(self.api_ty.clone()),
+        };
+        // Rendered:
+        //   fn set_/* self.ident */(&mut self, #arg)
+        let sig = sig::Builder::new().with_receiver(Receiver::new_ref_mut_self()).build(
+            span,
+            syn::Ident::new(&format!("set_{}", self.ident), self.ident.span()),
+            |_| [arg],
+            |_| None,
+        );
+        let stmts = self.make_setter_body(repr_width, field_ident, false);
+
+        syn::ImplItemFn {
+            attrs: vec![],
+            vis: self.vis,
+            defaultness: None,
+            sig,
+            block: syn::Block { brace_token: syn::token::Brace(span), stmts },
+        }
+    }
+
+    fn make_setter_body(
+        &self,
+        repr_width: usize,
+        field_ident: syn::Ident,
+        is_unchecked: bool,
+    ) -> Vec<syn::Stmt> {
+        let span = self.span;
+
+        let and_token = syn::Token![&](span);
+        let and_eq_token = syn::Token![&=](span);
+        let colon_token = syn::Token![:](span);
+        let dot_token = syn::Token![.](span);
+        let eq_token = syn::Token![=](span);
+        let not_token = syn::Token![!](span);
+        let or_eq_token = syn::Token![|=](span);
+        let semi_token = syn::Token![;](span);
+        let shl_token = syn::Token![<<](span);
+
+        // Rendered:
+        //   self.0
+        let self_0_expr: syn::Expr = syn::ExprField {
+            attrs: vec![],
+            base: Box::new(expr_path!(span; self)),
+            dot_token,
+            member: syn::Member::Unnamed(syn::Index { index: 0, span }),
+        }
+        .into();
+
+        // In the trivial case, this field covers the entire struct representation, so we can use an
+        // assignment.
+        let field_width = self.pseudo_ty.width();
+        if let Width::Met(_, field_width) = &field_width {
+            if *field_width == repr_width {
+                // Rendered:
+                //   self.0 = field;
+                return vec![syn::Stmt::Expr(
+                    syn::ExprAssign {
+                        attrs: vec![],
+                        left: Box::new(self_0_expr),
+                        eq_token,
+                        right: Box::new(expr_path!(field_ident)),
+                    }
+                    .into(),
+                    Some(semi_token),
+                )];
+            }
+        }
+
+        // In the routine case, this field covers only part of the struct representation, so we need
+        // to perform bitwise operations.
+
+        // Rendered:
+        //   (!0 >> (#repr_width - #field_width))
+        let mask_expr = mask(Width::Met(span, repr_width), field_width);
+
+        let mut stmts = Vec::with_capacity(2);
+        // Rendered:
+        //   self.0 &= !(#mask_expr << (#field_offset));
+        stmts.push(syn::Stmt::Expr(
+            syn::ExprBinary {
+                attrs: vec![],
+                left: Box::new(self_0_expr.clone()),
+                op: syn::BinOp::BitAndAssign(and_eq_token),
+                right: Box::new(
+                    syn::ExprUnary {
+                        attrs: vec![],
+                        op: syn::UnOp::Not(not_token),
+                        expr: Box::new(parenthesize(syn::ExprBinary {
+                            attrs: vec![],
+                            left: Box::new(mask_expr.clone()),
+                            op: syn::BinOp::Shl(shl_token),
+                            right: Box::new(field_offset.parenthesize().into()),
+                        })),
+                    }
+                    .into(),
+                ),
+            }
+            .into(),
+            Some(semi_token),
+        ));
+
+        let field_expr = if is_unchecked {
+            expr_path!(field_ident)
+        } else {
+            // Rendered:
+            //   (field & #mask_expr)
+            parenthesize(syn::ExprBinary {
+                attrs: vec![],
+                left: Box::new(expr_path!(field_ident)),
+                op: syn::BinOp::BitAnd(and_token),
+                right: Box::new(mask_expr),
+            })
+        };
+        // Rendered:
+        //   self.0 |= #field_expr << /* self.offset */;
+        stmts.push(syn::Stmt::Expr(
+            syn::ExprBinary {
+                attrs: vec![],
+                left: Box::new(self_0_expr),
+                op: syn::BinOp::BitOrAssign(or_eq_token),
+                right: Box::new(
+                    syn::ExprBinary {
+                        attrs: vec![],
+                        left: Box::new(field_expr),
+                        op: syn::BinOp::Shl(shl_token),
+                        right: Box::new(self.offset),
+                    }
+                    .into(),
+                ),
+            }
+            .into(),
+            Some(semi_token),
+        ));
+
+        stmts
     }
 }
 

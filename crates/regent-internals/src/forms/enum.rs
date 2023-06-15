@@ -10,6 +10,22 @@ impl Form for Enum {
     type Item = syn::ItemEnum;
 
     fn bitwise(mut item: Self::Item) -> Result<Output<Self::Item>> {
+        // For the enum form of `bitwise`, we need to do two things:
+        //
+        // - add a `#[repr]` outer attribute to the item if not present already
+        // - generate the `Bitwise` implementation for the item
+        //
+        // This list is quite short. In fact, we do not modify the item at all except for the
+        // `#[repr]` attribute, and as for the `Bitwise` implementation, all but one of the
+        // associated functions can be generated without inspecting the item. The exception is
+        // `from_repr_checked`, which requires us to know all of the enum variants and their
+        // discriminants.
+        //
+        // The meat of `Enum::bitwise` is iterating over the enum variants, calculating their
+        // discriminants in the process, and using this information to build a match expression for
+        // `from_repr_checked` that assigns each bit-pattern allowed by the enum representation a
+        // `Some(variant)` or `None`.
+
         check_generics(&item.generics)?;
 
         // These are the arms of the match expression used to implement
@@ -37,7 +53,7 @@ impl Form for Enum {
             let (discrim, discrim_lit) = if let Some((_, expr)) = &variant.discriminant {
                 let span = expr.span();
                 let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(lit ), .. }) = expr else {
-                    return Err(err!(span; "variant discriminant must be an integer literal"));
+                    return Err(err!(span; "variant discriminant must be an unsigned integer literal"));
                 };
                 let discrim = lit.base10_parse().map_err(Error)?;
 
@@ -156,16 +172,28 @@ impl Form for Enum {
         };
 
         // This cryptically-named boolean expresses whether there is a one-to-one correspondence
-        // between the set of discriminants in this enum and the set of values allowed by
+        // between the set of discriminants in this enum and the set of bit-patterns allowed by
         // `item_repr`. In other words, this describes whether the enum 'fills' its representation
         // or not.
+        //
+        // We can prove this informally by observing that:
+        //
+        // - The discriminants are guaranteed to be values of the representation type (because the
+        //   enum has a `#[repr]` attribute)
+        // - Hence, the possible values of the discriminants range from 0 to the maximum value
+        //   allowed by the representation
+        // - Any two variants cannot share the same discriminant (the compiler does not allow this)
+        //
+        // Therefore, if the number of discriminants (or equivalently, the number of variants) is
+        // equal to the number of unique bit-patterns allowed by the representation (given by
+        // `pow(2, width)`), then the enum is isomorphic with its representation. If this is the
+        // case, we can replace our lengthy match expression with a call to `mem::transmute`.
+        // Otherwise, we must use a wildcard match arm.
         let is_isomorphic_with_repr = 2usize.pow(item_repr.width() as _) == item.variants.len();
+
         // This is the `from_repr_checked` method.
         let from_repr_checked = if is_isomorphic_with_repr {
-            // We can reuse `from_repr_unchecked` because all values allowed by the representation
-            // correspond to variants in the enum.
-
-            // Oops---that was a waste.
+            // We no longer need this.
             drop(from_repr_checked_arms);
 
             // Rendered:

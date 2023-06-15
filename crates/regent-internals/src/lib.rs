@@ -408,9 +408,9 @@ trait Form {
 struct Output<Item> {
     /// Statements to be executed in a `const` context at the global scope.
     ///
-    /// If present, [`bitwise!`] emits these statements in a `const _: () = {/* ... */}` item. These
-    /// statements typically consist of assertions that uphold invariants which cannot otherwise be
-    /// guaranteed at macro evaluation time.
+    /// If present, [`bitwise!`] emits these statements in a `const _: () = {/* ... */}` item.
+    /// These statements typically consist of assertions that uphold invariants which cannot
+    /// otherwise be guaranteed at macro evaluation time.
     const_ctx: Vec<syn::Stmt>,
     /// The emitted item.
     ///

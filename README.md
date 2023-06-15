@@ -4,70 +4,228 @@
 [![docs.rs](https://docs.rs/regent/badge.svg)](https://docs.rs/regent)
 [![MPL-2.0 license](https://img.shields.io/github/license/norepimorphism/regent)](./LICENSE)
 
-*Regent* is a Rust crate for making bitfield structures. The sole API is the attribute macro `#[bitwise]`, which generates a struct of tightly packed, arbitrarily wide fields with accompanying constructors and accessor methods.
+*Regent* is a pair of Rust crates for making bitfield structures. The sole API is the attribute macro `#[bitwise]`, which generates a struct of tightly packed, arbitrarily wide fields with accompanying constructors and accessor methods.
 
-To get started, add the *regent* crate from [crates.io](https://crates.io) to your `Cargo.toml`:
+## Guided Example
+
+<details>
+<summary>
+    <strong>The fastest way to learn Regent is by example.</strong> This section demonstrates a typical use case for Regent, introducing features gradually to approach a succinct and idiomatic solution. Familiarity with Rust is assumed.
+</summary>
+<br>
+
+The MIPS R3000 is a 32-bit RISC microprocessor. Like many CPUs, the R3000 has a status register (SR) that holds system variables pertaining to the architecture. Here's a diagram of it:
+
+![Diagram of the fields in a 32-bit CPU register.][r3000-sr]
+
+> Source: [*IDT R30xx Family Software Reference Manual*][r3000-ref], published in 1994 by Integrated Device Technology, Inc.
+
+Each system variable corresponds to a register *field*, depicted here as a rectangle. Most fields are labeled, but a few enclose the text "0"; these fields are immutable and always read zero. Above each field are the positions of its most- and least-significant bits (or just the position of the field if it is 1-bit). The bit in position 0 is the least-significant bit of the register, and bit 31 is the most significant.
+
+With Regent, you can model the SR as:
+
+```rust
+#[regent::bitwise(width = 32)]
+pub struct StatusRegister {
+    pub cu3: bool,
+    pub cu2: bool,
+    pub cu1: bool,
+    pub cu0: bool,
+    #[constant]
+    _26: u2,
+    pub re: bool,
+    #[constant]
+    _23: u2,
+    pub bev: bool,
+    pub ts: bool,
+    pub pe: bool,
+    pub cm: bool,
+    pub pz: bool,
+    pub swc: bool,
+    pub isc: bool,
+    pub im: u8,
+    #[constant]
+    _6: u2,
+    pub kuo: bool,
+    pub ieo: bool,
+    pub kup: bool,
+    pub iep: bool,
+    pub kuc: bool,
+    pub iec: bool,
+}
+```
+
+This looks like a Rust struct&mdash;and, syntactically speaking, it is. What's new is:
+
+- **The `width = 32` argument to the `#[bitwise]` attribute.** This informs Regent that the widths of all struct fields should sum to 32 bits. If they do not, Regent will emit a compile-time error.
+  - You can write `size = 4` instead if you prefer to specify the width in bytes.
+  - It is good practice&mdash;and is, in some cases, required&mdash;to include either a `width` or `size` argument. These help catch simple mistakes like missing or duplicated fields and are visual reminders of the struct width.
+- **The `#[constant]` attribute.** This marks a struct field as immutable and initializes it with a default value (in this case, 0).
+  - You can also pass a custom initial value with <code>#[constant(<em>value</em>)]</code>.
+- **The `u2` type**. This is an imaginary 2-bit unsigned integer type. Regent offers `u*` types for all unsigned integers 1 to 128 bits wide.
+
+At macro evaluation time, `#[bitwise]` expands the struct to (roughly) the following. (Function bodies are omitted for brevity.)
+
+<details>
+<summary>Expanded code</summary>
+<br>
+
+```rust
+pub type StatusRegister = impl StatusRegister;
+
+trait StatusRegister: Sized {
+
+}
+
+#[repr(transparent)]
+pub struct StatusRegister(u32);
+
+impl StatusRegister {
+    #[must_use = /* ... */]
+    pub const fn new(
+        cu3: bool,
+        cu2: bool,
+        cu1: bool,
+        cu0: bool,
+        re: bool,
+        bev: bool,
+        ts: bool,
+        pe: bool,
+        cm: bool,
+        pz: bool,
+        swc: bool,
+        isc: bool,
+        im: u8,
+        kuo: bool,
+        ieo: bool,
+        kup: bool,
+        iep: bool,
+        kuc: bool,
+        iec: bool,
+    ) -> impl regent::Fallible<Output = Self> {/* ... */}
+
+    #[must_use = /* ... */]
+    pub const fn cu3(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn cu2(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn cu1(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn cu0(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    const fn _26() -> u8 { 0 }
+    #[must_use = /* ... */]
+    pub const fn re(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    const fn _23() -> u8 { 0 }
+    #[must_use = /* ... */]
+    pub const fn bev(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn ts(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn pe(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn cm(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn pz(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn swc(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn isc(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn im(&self) -> u8 {/* ... */}
+    #[must_use = /* ... */]
+    const fn _6() -> u8 { 0 }
+    #[must_use = /* ... */]
+    pub const fn kuo(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn ieo(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn kup(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn iep(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn kuc(&self) -> bool {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn iec(&self) -> bool {/* ... */}
+
+    #[must_use = /* ... */]
+    pub const fn set_cu3(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_cu2(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_cu1(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_cu0(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_re(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_bev(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_ts(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_pe(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_cm(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_pz(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_swc(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_isc(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_im(&mut self, field: u8) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_kuo(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_ieo(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_kup(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_iep(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_kuc(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    #[must_use = /* ... */]
+    pub const fn set_iec(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+}
+
+impl regent::Bitwise for StatusRegister {
+    const FIELD_WIDTH: usize = 32;
+    type Repr = u32;
+    type FromReprFallible = /* private */;
+
+    fn from_repr(repr: Self::Repr) -> Self::FromReprFallible {/* ... */}
+    fn to_repr(&self) -> Self::Repr {/* ... */}
+    fn into_repr(self) -> Self::Repr {/* ... */}
+}
+
+impl regent::BitwiseExt for StatusRegister {
+    const REPR_WIDTH: usize = 32;
+}
+```
+
+</details>
+
+Imagine writing that by hand!
+
+What Regent has done is collapse the struct into a wrapper around a single unsigned integer type, called the *representation* type, and generate a constructor function `new` as well as a getter and setter method for each field. Regent has also implemented the `Bitwise` and `BitwiseExt` traits for the struct; these facilitate conversions to and from the representation and are documented in [the crate documentation][docs].
+
+You may have noticed the `impl regent::Fallible` return types in the `new` function and setter methods. The `Fallible` trait represents an operation that may fail. Crucially, `Fallible` is not the result of the operation, but the operation itself. As such, `Fallible` is inert until explicitly executed via a method that selects the error-handling strategy. The non-immediate execution of functions returning `impl regent::Fallible` is similar to that of `async` functions; in this way, executing a `Fallible` is analogous to polling a `Future` (though `Fallible` is otherwise unrelated to asynchronous programming).
+
+</details>
+
+## Getting Started
+
+If you're ready to use Regent, add [the *regent* crate][crate] to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 regent = "0.2"
 ```
 
-Then, head over to the crate documentation at [docs.rs] to learn how to use Regent. (Or check out the example below for a quick start!)
+Then, head over to [the crate documentation][docs] for a semi-formal specification on the `#[bitwise]` macro and information on the runtime `Bitwise` trait.
 
-[docs.rs]: https://docs.rs/regent/latest/regent
-
-## Example
-
-The struct definition
-
-```rust
-#[regent::bitwise(width = 32)]
-pub struct Frobnicator {
-    pub foo: u8,
-    pub bar: u5,
-    #[constant = 1234]
-    pub baz: u11,
-    pub qux: (bool, u4),
-    pub quux: [u1; 3],
-}
-```
-
-roughly expands to the following. (Function bodies are omitted for brevity.)
-
-```rust
-#[repr(transparent)]
-pub struct Frobnicator(u32);
-
-impl Frobnicator {
-    pub fn new(foo: u8, bar: u8, qux: (bool, u8), quux: [u8; 3]) -> Self {/* ... */}
-
-    pub fn foo(&self) -> u8 {/* ... */}
-    pub fn bar(&self) -> u8 {/* ... */}
-    pub const fn baz() -> u16 { 1234 }
-    pub fn qux(&self) -> (bool, u8) {/* ... */}
-    pub fn quux(&self) -> [u8; 3] {/* ... */}
-
-    pub fn set_foo(&mut self, field: u8) {/* ... */}
-    pub fn set_bar(&mut self, field: u8) {/* ... */}
-    pub fn set_qux(&mut self, field: (bool, u8)) {/* ... */}
-    pub fn set_quux(&mut self, field: [u8; 3]) {/* ... */}
-}
-
-impl regent::Bitwise for Frobnicator {
-    const WIDTH: usize = 32;
-    type Repr = u32;
-
-    unsafe fn from_repr_unchecked(repr: Self::Repr) -> Self {/* ... */}
-    fn from_repr_checked(repr: Self::Repr) -> Option<Self> {/* ... */}
-    fn to_repr(&self) -> Self::Repr {/* ... */}
-    fn into_repr(self) -> Self::Repr {/* ... */}
-}
-
-impl regent::BitwiseExt for Frobnicator {
-    const REPR_WIDTH: usize = 32;
-}
-```
+Otherwise, keep reading for a primer on Rust, bitfields, and Regent.
 
 ## Motivation
 
@@ -84,10 +242,6 @@ For all of the things Rust has, *bitfields* it has not. Roughly speaking, a bitf
 <br>
 
 ![Diagram of fields in a CPU register](./resources/mips-r3000-sr.png)
-
-> Source: [*IDT R30xx Family Software Reference Manual*](https://cgi.cse.unsw.edu.au/~cs3231/doc/R3000.pdf), published in 1994 by Integrated Device Technology, Inc.
-
-This diagram describes the status register in a MIPS CPU. Each rectangle represents a field, and the numbers above them are the positions of the least- and most-significant bits in the field. Bit 0 is the least-significant and bit 31 is the most-significant.
 
 Imagine modeling this structure in your favorite programming language without using bitfields. In C, the *IM* register field might become this:
 
@@ -240,6 +394,22 @@ These deficiencies have made C bitfields a common source of frustration for prog
 
 Rust avoided codifying such a controversial feature into the language, leaving the implementation to third-party libraries called *crates*. Regent is one of these crates, and its mission is to combine the intuitive syntax of C bitfields with sane, well-documented semantics.
 
+## Quick Reference
+
+The `#[bitwise]` attribute is a procedural (proc) macro that transforms a non-[ZST] struct item into a [newtype] of an unsigned integer primitive (like `u8` or `u32`) and emits associated functions for accessing struct fields as contiguous ranges of bits within the unsigned integer representation.
+
+`#[bitwise]` struct fields are inhabited by a subset of Rust types, namely: *unsigned integral types*, including the unsigned integer primitives, `bool`, and other `#[bitwise]` structs; tuples of unsigned integral types (e.g., `(u32, bool)`); and arrays of unsigned integral types (e.g., `[u8; 5]`).
+
+In the unsigned integer representation, `#[bitwise]` struct fields are tightly packed (i.e., no padding due to alignment). This applies to the fields themselves as well as the individual elements of tuple or array fields. Consequently, fields are unaligned and arbitrarily wide: a field of type `(u32, bool)` is *exactly* 33 bits wide, and `[u8; 5]` is *exactly* 40 bits.
+
+In theory, you can construct N-bit unsigned integer fields with `[bool; N]`, but `#[bitwise]` offers *pseudo-types* as a simpler alternative. The pseudo-types comprise all types of the form <code>u&#8239;<em>width</em></code> where 1&le;*width*&le;128, including the Rust primitives `u8`, `u16`, `u32`, `u64`, and `u128` in addition to imaginary types like `u5`, `u24`, and `u93`.
+
+The unsigned integral types can also be extended by applying `#[bitwise]` to [unit-only] enum items (i.e., C-style enums).
+
+[ZST]: https://doc.rust-lang.org/nomicon/exotic-sizes.html#zero-sized-types-zsts
+[unit-only]: https://doc.rust-lang.org/reference/items/enumerations.html#unit-only-enum
+[newtype]: https://doc.rust-lang.org/rust-by-example/generics/new_types.html
+
 ## Prior Art
 
 Regent is very similar to these other crates. Please check them out!
@@ -251,3 +421,8 @@ Regent is very similar to these other crates. Please check them out!
 ## Issues
 
 Bug reports, feature requests, and other enhancements are greatly appreciated!
+
+[crate]: https://crates.io/crates/regent
+[docs]: https://docs.rs/regent/latest/regent
+[r3000-ref]: https://cgi.cse.unsw.edu.au/~cs3231/doc/R3000.pdf
+[r3000-sr]: ./resources/mips-r3000-sr.png
