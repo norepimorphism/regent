@@ -10,8 +10,8 @@
 //!
 //! If you haven't done so already, it is highly recommended to consult [the README] for a primer on
 //! Regent; crate documentation hereafter assumes an understanding of the concepts established
-//! there. If desired, a semi-formal specification of `#[bitwise]` is also available in the [`spec`]
-//! module of this crate.
+//! there. A semi-formal specification of `#[bitwise]` is also available in the [`spec`] module of
+//! this crate.
 //!
 //! [the README]: https://github.com/norepimorphism/regent#readme
 
@@ -124,11 +124,13 @@ pub trait Bitwise: Sized {
     /// Converts this into a value of its [representation] without moving.
     ///
     /// [representation]: Self::Repr
+    #[must_use]
     fn to_repr(&self) -> Self::Repr;
 
     /// Converts this into a value of its [representation] by-move.
     ///
     /// [representation]: Self::Repr
+    #[must_use]
     fn into_repr(self) -> Self::Repr;
 }
 
@@ -157,6 +159,8 @@ impl<T: Bitwise> BitwiseExt for T {
 /// - [`masked`](Self::masked)
 /// - [`checked`](Self::checked)
 /// - [`unchecked`](Self::unchecked)
+#[must_use = "a `Fallible` operation does not execute until you call one of `panicking()`, \
+`masked()`, `checked()`, or `unchecked()`"]
 pub trait Fallible {
     type Output;
 
@@ -165,3 +169,7 @@ pub trait Fallible {
     fn checked(self) -> Option<Self::Output>;
     unsafe fn unchecked(self) -> Self::Output;
 }
+
+/// An opaque wrapper around `T`.
+#[repr(transparent)]
+pub struct Opaque<T>(T);

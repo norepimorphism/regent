@@ -1,10 +1,22 @@
 # ![Regent. Bitfields in Rust.](resources/logo-subtitle@0.5x.png)
 
-[![crates.io](https://img.shields.io/crates/v/regent)](https://crates.io/crates/regent)
-[![docs.rs](https://docs.rs/regent/badge.svg)](https://docs.rs/regent)
+[![crates.io](https://img.shields.io/crates/v/regent)][crate]
+[![docs.rs](https://docs.rs/regent/badge.svg)][docs]
 [![MPL-2.0 license](https://img.shields.io/github/license/norepimorphism/regent)](./LICENSE)
 
-*Regent* is a pair of Rust crates for making bitfield structures. The sole API is the attribute macro `#[bitwise]`, which generates a struct of tightly packed, arbitrarily wide fields with accompanying constructors and accessor methods.
+*Regent* is an ecosystem of [Rust] crates for making bitfield structures. The sole API is the attribute macro `#[bitwise]`, which generates a struct of tightly packed, arbitrarily wide fields with accompanying constructors and accessor methods.
+
+[Rust]: https://www.rust-lang.org/
+
+## Features
+
+- `#![no_std]`
+- Associated functions are `const fn` wherever possible
+- No [leaky abstractions]&mdash;`#[bitwise]` does not pollute the call-site scope with items that expose implementation details (like `mod __private`)
+- Minimum supported Rust version (MSRV) is [1.67.0]
+
+[leaky abstractions]: https://en.wikipedia.org/wiki/Leaky_abstraction
+[1.67.0]: https://blog.rust-lang.org/2023/01/26/Rust-1.67.0.html
 
 ## Guided Example
 
@@ -16,13 +28,17 @@
 
 The MIPS R3000 is a 32-bit RISC microprocessor. Like many CPUs, the R3000 has a status register (SR) that holds system variables pertaining to the architecture. Here's a diagram of it:
 
-![Diagram of the fields in a 32-bit CPU register.][r3000-sr]
+![Diagram of the fields in a 32-bit CPU register.](./resources/mips-r3000-sr.png)
 
 > Source: [*IDT R30xx Family Software Reference Manual*][r3000-ref], published in 1994 by Integrated Device Technology, Inc.
 
+[r3000-ref]: https://cgi.cse.unsw.edu.au/~cs3231/doc/R3000.pdf
+
 Each system variable corresponds to a register *field*, depicted here as a rectangle. Most fields are labeled, but a few enclose the text "0"; these fields are immutable and always read zero. Above each field are the positions of its most- and least-significant bits (or just the position of the field if it is 1-bit). The bit in position 0 is the least-significant bit of the register, and bit 31 is the most significant.
 
-With Regent, you can model the SR as:
+### A First Attempt
+
+We can model the SR with the `#[bitwise]` macro from Regent:
 
 ```rust
 #[regent::bitwise(width = 32)]
@@ -31,10 +47,10 @@ pub struct StatusRegister {
     pub cu2: bool,
     pub cu1: bool,
     pub cu0: bool,
-    #[constant]
+    #[const]
     _26: u2,
     pub re: bool,
-    #[constant]
+    #[const]
     _23: u2,
     pub bev: bool,
     pub ts: bool,
@@ -44,7 +60,7 @@ pub struct StatusRegister {
     pub swc: bool,
     pub isc: bool,
     pub im: u8,
-    #[constant]
+    #[const]
     _6: u2,
     pub kuo: bool,
     pub ieo: bool,
@@ -55,14 +71,19 @@ pub struct StatusRegister {
 }
 ```
 
-This looks like a Rust struct&mdash;and, syntactically speaking, it is. What's new is:
+`#[bitwise]` parses a struct-like syntax. It largely overlaps with Rust's [struct item syntax] but has different semantics&mdash;most importantly, `#[bitwise]` fields are bit-packed rather than aligned at byte boundaries. `#[bitwise]` also supports several new constructs, some of which appear here in `StatusRegister`. These are:
+
+[struct item syntax]: https://doc.rust-lang.org/reference/items/structs.html
 
 - **The `width = 32` argument to the `#[bitwise]` attribute.** This informs Regent that the widths of all struct fields should sum to 32 bits. If they do not, Regent will emit a compile-time error.
   - You can write `size = 4` instead if you prefer to specify the width in bytes.
-  - It is good practice&mdash;and is, in some cases, required&mdash;to include either a `width` or `size` argument. These help catch simple mistakes like missing or duplicated fields and are visual reminders of the struct width.
-- **The `#[constant]` attribute.** This marks a struct field as immutable and initializes it with a default value (in this case, 0).
-  - You can also pass a custom initial value with <code>#[constant(<em>value</em>)]</code>.
-- **The `u2` type**. This is an imaginary 2-bit unsigned integer type. Regent offers `u*` types for all unsigned integers 1 to 128 bits wide.
+  - It is good practice&mdash;and is, in some cases, required&mdash;to include either a `width` or `size` argument. These help catch simple mistakes like missing or duplicated fields and serve as visual reminders of the struct width.
+  - The value passed to `width` or `size` must be an unsuffixed, unsigned integer literal.
+- **The `#[const]` attribute.** This imbues a struct field with a compile-time constant value of `Default::default()`. Fields annotated with `#[const]` are called *constant fields*.
+  - You can assign a custom constant value like `#[const = 0]`. Constant values can be any [constant expression] that is valid for the type of the field.
+- **The `u2` type**. This is an imaginary 2-bit unsigned integer type. Regent provides built-in `u*` types for all unsigned integers 1 to 128 bits wide (but not `usize`).
+
+[constant expression]: https://doc.rust-lang.org/reference/const_eval.html#constant-expressions
 
 At macro evaluation time, `#[bitwise]` expands the struct to (roughly) the following. (Function bodies are omitted for brevity.)
 
@@ -71,17 +92,10 @@ At macro evaluation time, `#[bitwise]` expands the struct to (roughly) the follo
 <br>
 
 ```rust
-pub type StatusRegister = impl StatusRegister;
-
-trait StatusRegister: Sized {
-
-}
-
 #[repr(transparent)]
-pub struct StatusRegister(u32);
+pub struct StatusRegister(regent::Opaque<u32>);
 
 impl StatusRegister {
-    #[must_use = /* ... */]
     pub const fn new(
         cu3: bool,
         cu2: bool,
@@ -104,88 +118,49 @@ impl StatusRegister {
         iec: bool,
     ) -> impl regent::Fallible<Output = Self> {/* ... */}
 
-    #[must_use = /* ... */]
+    // Getters
     pub const fn cu3(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn cu2(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn cu1(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn cu0(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     const fn _26() -> u8 { 0 }
-    #[must_use = /* ... */]
     pub const fn re(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     const fn _23() -> u8 { 0 }
-    #[must_use = /* ... */]
     pub const fn bev(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn ts(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn pe(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn cm(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn pz(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn swc(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn isc(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn im(&self) -> u8 {/* ... */}
-    #[must_use = /* ... */]
     const fn _6() -> u8 { 0 }
-    #[must_use = /* ... */]
     pub const fn kuo(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn ieo(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn kup(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn iep(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn kuc(&self) -> bool {/* ... */}
-    #[must_use = /* ... */]
     pub const fn iec(&self) -> bool {/* ... */}
 
-    #[must_use = /* ... */]
+    // Setters
     pub const fn set_cu3(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_cu2(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_cu1(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_cu0(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_re(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_bev(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_ts(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_pe(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_cm(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_pz(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_swc(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_isc(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_im(&mut self, field: u8) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_kuo(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_ieo(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_kup(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_iep(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_kuc(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
-    #[must_use = /* ... */]
     pub const fn set_iec(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
 }
 
@@ -206,11 +181,96 @@ impl regent::BitwiseExt for StatusRegister {
 
 </details>
 
-Imagine writing that by hand!
+What Regent has done is collapse the struct into a wrapper around a single unsigned integer type called the *representation*&mdash;depicted here by the newtype `regent::Opaque<u32>`&mdash;and generate a constructor function `new` as well as a getter and setter method for each field (except for constant fields, which have only a getter). Regent has also implemented the `Bitwise` and `BitwiseExt` traits for the struct; these facilitate conversions to and from the representation and are documented in [the crate documentation][docs].
 
-What Regent has done is collapse the struct into a wrapper around a single unsigned integer type, called the *representation* type, and generate a constructor function `new` as well as a getter and setter method for each field. Regent has also implemented the `Bitwise` and `BitwiseExt` traits for the struct; these facilitate conversions to and from the representation and are documented in [the crate documentation][docs].
+### The `Fallible` Trait
 
-You may have noticed the `impl regent::Fallible` return types in the `new` function and setter methods. The `Fallible` trait represents an operation that may fail. Crucially, `Fallible` is not the result of the operation, but the operation itself. As such, `Fallible` is inert until explicitly executed via a method that selects the error-handling strategy. The non-immediate execution of functions returning `impl regent::Fallible` is similar to that of `async` functions; in this way, executing a `Fallible` is analogous to polling a `Future` (though `Fallible` is otherwise unrelated to asynchronous programming).
+Some functions emitted by `#[bitwise]` are fallible, meaning they may encounter errors. The `new` function fails if any argument is not a valid value for the type of its corresponding field. Likewise, setters fail if their argument is invalid for the field being set.
+
+There are numerous strategies for handling and recovering from errors, each with trade-offs, so it is often desirable for an API to support a variety for any given fallible operation. Because some strategies necessitate different function signatures than others, a fallible operation is commonly broken into multiple functions that each implement the operation with a different error-handling strategy.
+
+A common idiom in Rust is for a fallible function `f` to have `checked_f` and `unchecked_f` versions. By convention, `f` takes the form `fn(...) -> T` and panics on error; `checked_f` has signature `fn(...) -> Option<T>` and returns `None` on error; and `unchecked_f` is `unsafe fn(...) -> T` and performs no error-checking at all (possibly causing UB if an error condition arises).
+
+Regent takes an alternative yet functionally equivalent approach[^fallible-trait] in which the error-handling strategies available to a fallible operation are realized as associated functions of a trait. An existential type[^existential-type] (`impl Trait`) implementing the trait is then produced by an associated function of `T` that stands in for the fallible operation.
+
+[^fallible-trait]: The reasons for this approach were originally based on aesthetic preference of the author (rather than something more important, like genericity or ease of implementation). I would be happy to host discussion of this choice and potential arguments for alternatives in a [GitHub discussion].
+[^existential type]: [varkor] gives an excellent introduction to existential types in Rust; see <https://varkor.github.io/blog/2018/07/03/existential-types-in-rust.html>.
+
+[GitHub discussion]: https://github.com/norepimorphism/regent/discussions/new?category=general
+[varkor]: https://github.com/varkor
+
+In Regent, the trait is `regent::Fallible`&mdash;roughly defined as
+
+```rust
+pub trait Fallible {
+    type Output;
+
+    // Panics on the first error.
+    fn panicking(self) -> Self::Output;
+    // Returns `None` on the first error.
+    fn checked(self) -> Option<Self::Output>;
+    // Ignores all errors.
+    fn masked(self) -> Self::Output;
+    // Assumes that errors cannot occur.
+    unsafe fn unchecked(self) -> Self::Output;
+}
+```
+
+&mdash;and the existential type which implements it is `impl Fallible`.
+All fallible functions return this type. You can use them like this:
+
+```rust
+// Bring `Fallible` into scope.
+use regent::Fallible as _;
+
+let _: StatusRegister = StatusRegister::new(/* ... */).panicking();
+let _: StatusRegister = StatusRegister::new(/* ... */).masked();
+let _: Option<StatusRegister> = StatusRegister::new(/* ... */).checked();
+unsafe {
+    let _: StatusRegister = StatusRegsiter::new(/* ... */).unchecked();
+}
+```
+
+The most important thing to remember is: `impl Fallible` is not the result of a fallible operation, but rather the operation itself. As such, it is inert until explicitly executed via a method that selects the error-handling strategy. The non-immediate execution of functions returning `impl Fallible` is similar to that of `async` functions; in this way, executing a `Fallible` is analogous to `.await`ing a `Future` (though `Fallible` is otherwise unrelated to asynchronous programming).
+
+### Fine-Tuning
+
+Our definition of `StatusRegister` is workable, but there is room for improvement.
+
+One improvement which requires only minor modification involves the constant fields presently named `_26`, `_23`, and `_6`; these correspond to the zero-filled register fields that inhabit bits 26&ndash;27, 23&ndash;24, and 6&ndash;7, respectively. To a MIPS programmer, these are not very useful and are only defined in `StatusRegister` to confirm with the MIPS standard. Hence, they might be aptly labeled as implementation details which we prefer to hide, both from the call-site scope of the `#[bitwise]` macro invocation and especially any parent modules and external crates. We have already accomplished the latter by omitting the visibility specifier, preventing associated functions from being exported, but ideally we wish to suppress those functions from being emitted in the first place. In Regent, this is done by replacing the field identifier with the underscore token `_`. (This is not possible in vanilla Rust as idents cannot be `_`[^wildcard-ident].)
+
+[^wildcard-ident]: You might object that many grammatical constructs in Rust, like `let` bindings and destructuring patterns, allow `_` to be used like an ident. This is because their syntax accepts a pattern, which can be formed by an ident or `_` (or many other things). But in general, an ident cannot be `_`, and this is the case for struct fields.
+
+```rust
+#[regent::bitwise(width = 32)]
+pub struct StatusRegister {
+    pub cu3: bool,
+    pub cu2: bool,
+    pub cu1: bool,
+    pub cu0: bool,
+    #[const]
+    _: u2,          // NEW
+    pub re: bool,
+    #[const]
+    _: u2,          // NEW
+    pub bev: bool,
+    pub ts: bool,
+    pub pe: bool,
+    pub cm: bool,
+    pub pz: bool,
+    pub swc: bool,
+    pub isc: bool,
+    pub im: u8,
+    #[const]
+    _: u2,          // NEW
+    pub kuo: bool,
+    pub ieo: bool,
+    pub kup: bool,
+    pub iep: bool,
+    pub kuc: bool,
+    pub iec: bool,
+}
+```
 
 </details>
 
@@ -424,5 +484,3 @@ Bug reports, feature requests, and other enhancements are greatly appreciated!
 
 [crate]: https://crates.io/crates/regent
 [docs]: https://docs.rs/regent/latest/regent
-[r3000-ref]: https://cgi.cse.unsw.edu.au/~cs3231/doc/R3000.pdf
-[r3000-sr]: ./resources/mips-r3000-sr.png

@@ -5,6 +5,7 @@ name = "regent-internals"
 version = "0.2.0"
 authors = ["norepimorphism <norepi@protonmail.com>"]
 edition = "2021"
+rust-version = "1.67.0"
 description = "Proc macro counterpart to the regent crate"
 repository = "https://github.com/norepimorphism/regent"
 license = "MPL-2.0"
