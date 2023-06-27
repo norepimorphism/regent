@@ -4,6 +4,10 @@
 [![docs.rs](https://docs.rs/regent/badge.svg)][docs]
 [![MPL-2.0 license](https://img.shields.io/github/license/norepimorphism/regent)](./LICENSE)
 
+> **⚠️ NOTICE: This README is Under Construction**
+>
+> This README is incomplete and describes a version of Regent which is not yet available on crates.io.
+
 *Regent* is an ecosystem of [Rust] crates for making bitfield structures. The sole API is the attribute macro `#[bitwise]`, which generates a struct of tightly packed, arbitrarily wide fields with accompanying constructors and accessor methods.
 
 [Rust]: https://www.rust-lang.org/
@@ -181,7 +185,7 @@ impl regent::BitwiseExt for StatusRegister {
 
 </details>
 
-What Regent has done is collapse the struct into a wrapper around a single unsigned integer type called the *representation*&mdash;depicted here by the newtype `regent::Opaque<u32>`&mdash;and generate a constructor function `new` as well as a getter and setter method for each field (except for constant fields, which have only a getter). Regent has also implemented the `Bitwise` and `BitwiseExt` traits for the struct; these facilitate conversions to and from the representation and are documented in [the crate documentation][docs].
+What Regent has done is collapse the struct into a wrapper around a single unsigned integer type called the *representation*&mdash;expressed here by the newtype `regent::Opaque<u32>`&mdash;and generate a constructor function `new` as well as a getter and setter method for each field (except for constant fields, which have only a getter). Regent has also implemented the `Bitwise` and `BitwiseExt` traits for the struct; these facilitate conversions to and from the representation and are documented in [the crate documentation][docs].
 
 ### The `Fallible` Trait
 
@@ -194,6 +198,7 @@ A common idiom in Rust is for a fallible function `f` to have `checked_f` and `u
 Regent takes an alternative yet functionally equivalent approach[^fallible-trait] in which the error-handling strategies available to a fallible operation are realized as associated functions of a trait. An existential type[^existential-type] (`impl Trait`) implementing the trait is then produced by an associated function of `T` that stands in for the fallible operation.
 
 [^fallible-trait]: The reasons for this approach were originally based on aesthetic preference of the author (rather than something more important, like genericity or ease of implementation). I would be happy to host discussion of this choice and potential arguments for alternatives in a [GitHub discussion].
+
 [^existential type]: [varkor] gives an excellent introduction to existential types in Rust; see <https://varkor.github.io/blog/2018/07/03/existential-types-in-rust.html>.
 
 [GitHub discussion]: https://github.com/norepimorphism/regent/discussions/new?category=general
@@ -237,9 +242,13 @@ The most important thing to remember is: `impl Fallible` is not the result of a 
 
 Our definition of `StatusRegister` is workable, but there is room for improvement.
 
-One improvement which requires only minor modification involves the constant fields presently named `_26`, `_23`, and `_6`; these correspond to the zero-filled register fields that inhabit bits 26&ndash;27, 23&ndash;24, and 6&ndash;7, respectively. To a MIPS programmer, these are not very useful and are only defined in `StatusRegister` to confirm with the MIPS standard. Hence, they might be aptly labeled as implementation details which we prefer to hide, both from the call-site scope of the `#[bitwise]` macro invocation and especially any parent modules and external crates. We have already accomplished the latter by omitting the visibility specifier, preventing associated functions from being exported, but ideally we wish to suppress those functions from being emitted in the first place. In Regent, this is done by replacing the field identifier with the underscore token `_`. (This is not possible in vanilla Rust as idents cannot be `_`[^wildcard-ident].)
+One such improvement which requires only minor modification involves the constant fields presently named `_26`, `_23`, and `_6`; these correspond to the zero-filled register fields that inhabit bits 26&ndash;27, 23&ndash;24, and 6&ndash;7, respectively. To a MIPS programmer, these are not very useful and are only defined in `StatusRegister` to conform with the MIPS standard. Hence, we will consider them implementation details which should have no effect outside the definition of `StatusRegister`.
 
-[^wildcard-ident]: You might object that many grammatical constructs in Rust, like `let` bindings and destructuring patterns, allow `_` to be used like an ident. This is because their syntax accepts a pattern, which can be formed by an ident or `_` (or many other things). But in general, an ident cannot be `_`, and this is the case for struct fields.
+We have already taken one step in this direction, that being the omission of a visibility specifier (e.g., `pub`), and this prevents associated functions from being exported to parent modules or external crates. But ideally, we wish to suppress those functions from being emitted in the first place.
+
+In Regent, this can be done by replacing the field identifier with the underscore token `_` as shown below. (This is not possible in vanilla Rust as idents cannot be `_`[^wildcard-ident].)
+
+[^wildcard-ident]: You might object that many grammatical constructs in Rust, like `let` bindings and destructuring patterns, allow `_` to be used like an ident. This is because their syntax accepts a pattern, which can be formed by an ident or `_` (among many other constructions). But in general, an ident cannot be `_`, and this is indeed the case for struct fields.
 
 ```rust
 #[regent::bitwise(width = 32)]
