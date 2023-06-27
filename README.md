@@ -4,18 +4,19 @@
 [![docs.rs](https://docs.rs/regent/badge.svg)][docs]
 [![MPL-2.0 license](https://img.shields.io/github/license/norepimorphism/regent)](./LICENSE)
 
-> **⚠️ NOTICE: This README is Under Construction**
->
-> This README is incomplete and describes a version of Regent which is not yet available on crates.io.
+> **Warning**
+> This README is incomplete and describes a version of Regent which is not yet available on crates.io (and which differs quite significantly from the version most recently published).
 
-*Regent* is an ecosystem of [Rust] crates for making bitfield structures. The sole API is the attribute macro `#[bitwise]`, which generates a struct of tightly packed, arbitrarily wide fields with accompanying constructors and accessor methods.
+*Regent* is an ecosystem of [Rust] crates for making bitfield structures. The sole API is the attribute macro `#[bitwise]`, which generates a struct of bit-packed, arbitrary-width fields with accompanying constructors and accessor functions.
 
 [Rust]: https://www.rust-lang.org/
 
 ## Features
 
 - `#![no_std]`
+- Bitfields can be unsigned integers, `bool`s, unit-only enums, other `#[bitwise]` structs, or tuples or arrays of those types
 - Associated functions are `const fn` wherever possible
+- Conversion routines and limited type reflection for `#[bitwise]` structs are provided by the `Bitwise` trait
 - No [leaky abstractions]&mdash;`#[bitwise]` does not pollute the call-site scope with items that expose implementation details (like `mod __private`)
 - Minimum supported Rust version (MSRV) is [1.67.0]
 
@@ -122,7 +123,6 @@ impl StatusRegister {
         iec: bool,
     ) -> impl regent::Fallible<Output = Self> {/* ... */}
 
-    // Getters
     pub const fn cu3(&self) -> bool {/* ... */}
     pub const fn cu2(&self) -> bool {/* ... */}
     pub const fn cu1(&self) -> bool {/* ... */}
@@ -146,7 +146,6 @@ impl StatusRegister {
     pub const fn kuc(&self) -> bool {/* ... */}
     pub const fn iec(&self) -> bool {/* ... */}
 
-    // Setters
     pub const fn set_cu3(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
     pub const fn set_cu2(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
     pub const fn set_cu1(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
@@ -166,6 +165,46 @@ impl StatusRegister {
     pub const fn set_iep(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
     pub const fn set_kuc(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
     pub const fn set_iec(&mut self, field: bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+
+    pub const fn map_cu3(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_cu2(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_cu1(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_cu0(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_re(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_bev(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_ts(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_pe(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_cm(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_pz(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_swc(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_isc(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_im(&mut self, f: impl FnOnce(u8) -> u8) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_kuo(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_ieo(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_kup(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_iep(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_kuc(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn map_iec(&mut self, f: impl FnOnce(bool) -> bool) -> impl regent::Fallible<Output = ()> {/* ... */}
+
+    pub const fn modify_cu3(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_cu2(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_cu1(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_cu0(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_re(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_bev(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_ts(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_pe(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_cm(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_pz(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_swc(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_isc(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_im(&mut self, f: impl FnOnce(&mut u8)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_kuo(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_ieo(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_kup(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_iep(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_kuc(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
+    pub const fn modify_iec(&mut self, f: impl FnOnce(&mut bool)) -> impl regent::Fallible<Output = ()> {/* ... */}
 }
 
 impl regent::Bitwise for StatusRegister {
@@ -185,11 +224,37 @@ impl regent::BitwiseExt for StatusRegister {
 
 </details>
 
-What Regent has done is collapse the struct into a wrapper around a single unsigned integer type called the *representation*&mdash;expressed here by the newtype `regent::Opaque<u32>`&mdash;and generate a constructor function `new` as well as a getter and setter method for each field (except for constant fields, which have only a getter). Regent has also implemented the `Bitwise` and `BitwiseExt` traits for the struct; these facilitate conversions to and from the representation and are documented in [the crate documentation][docs].
+What Regent has done is collapse the struct into a wrapper around a single unsigned integer type called the *representation*&mdash;expressed here by the newtype `regent::Opaque<u32>`&mdash;and generate a constructor function `new` as well as accessor functions for each field. Regent has also implemented the `Bitwise` and `BitwiseExt` traits for the struct; these facilitate conversions to and from the representation and are documented in [the crate documentation][docs].
+
+Fields which contain an imaginary integer type like `u2` have, in the signatures of all functions that reference the field, replaced all instances of the imaginary type with a Rust integer primitive of greater width (e.g., `u2` is replaced by `u8`). The type of a field as used in function signatures is its *API type*.
+
+### Accessor Methods
+
+The so-called accessors comprise functions of the forms *`field`*, <code>set_<i>field</i></code>, <code>map_<i>field</i></code>, and <code>modify_<i>field</i></code>. The *`field`* function is a *getter*, meaning it returns the value of its field without mutating it; the others are *setters*, meaning they mutate their field. All fields support all accessor functions with the exception of constant fields, which have only the getter *`field`*. For non-constant fields, *`field`* is a method of type `const fn(&self) -> T` (where `T` is the API type). For constant fields, *`field`* is a free function of type `const fn() -> T`.
+
+The <code>set_<i>field</i></code> method is the simplest of the setters; with type `const fn(&mut self, T)`, it assigns the field a new value and discards the old one. <code>map_<i>field</i></code> and <code>modify_<i>field</i></code> are related in that they take a callback function rather than a value of `T`. Specifically, <code>map_<i>field</i></code> has type `const fn(&mut self, impl FnOnce(T) -> T)` and assigns to the field the result of invoking the callback with the current value of the field. <code>modify_<i>field</i></code>, on the other hand, has type `const fn(&mut self, impl FnOnce(&mut T))` and simply invokes the callback with a mutable reference to the value of the field.
+
+It may be helpful in visualizing the behavior of the various setter functions to see how they might be implemented. <code>map_<i>field</i></code> and <code>modify_<i>field</i></code> can in fact be defined in terms of the more fundamental *`field`* and <code>set_<i>field</i></code>. In pseudo-code:
+
+```rust
+impl Struct {
+    const fn map_field(&mut self, f: impl FnOnce(T) -> T) {
+        let old = self.field();
+        let new = f(old);
+        self.set_field(new);
+    }
+
+    const fn modify_field(&mut self, f: impl FnOnce(&mut T)) {
+        let mut field = self.field();
+        f(&mut field);
+        self.set_field(field);
+    }
+}
+```
 
 ### The `Fallible` Trait
 
-Some functions emitted by `#[bitwise]` are fallible, meaning they may encounter errors. The `new` function fails if any argument is not a valid value for the type of its corresponding field. Likewise, setters fail if their argument is invalid for the field being set.
+Some functions emitted by `#[bitwise]` are fallible, meaning they may encounter errors. The `new` function fails if any argument is not a valid value for the type of its corresponding field. Likewise, <code>set_<i>field</i></code> fails if its argument is invalid for the field being set, and the other setters inherit this fallibility from their dependence on <code>set_<i>field</i></code>.
 
 There are numerous strategies for handling and recovering from errors, each with trade-offs, so it is often desirable for an API to support a variety for any given fallible operation. Because some strategies necessitate different function signatures than others, a fallible operation is commonly broken into multiple functions that each implement the operation with a different error-handling strategy.
 
@@ -235,7 +300,8 @@ unsafe {
 }
 ```
 
-The most important thing to remember is: `impl Fallible` is not the result of a fallible operation, but rather the operation itself. As such, it is inert until explicitly executed via a method that selects the error-handling strategy. The non-immediate execution of functions returning `impl Fallible` is similar to that of `async` functions; in this way, executing a `Fallible` is analogous to `.await`ing a `Future` (though `Fallible` is otherwise unrelated to asynchronous programming).
+> **Note**
+> `impl Fallible` is not the result of a fallible operation, but rather the operation itself. As such, it is inert until explicitly executed via a method that selects the error-handling strategy. The non-immediate execution of functions returning `impl Fallible` is similar to that of `async` functions; in this way, executing a `Fallible` is analogous to `.await`ing a `Future` (though `Fallible` is otherwise unrelated to asynchronous programming).
 
 ### Fine-Tuning
 
@@ -245,9 +311,12 @@ One such improvement which requires only minor modification involves the constan
 
 We have already taken one step in this direction, that being the omission of a visibility specifier (e.g., `pub`), and this prevents associated functions from being exported to parent modules or external crates. But ideally, we wish to suppress those functions from being emitted in the first place.
 
-In Regent, this can be done by replacing the field identifier with the underscore token `_` as shown below. (This is not possible in vanilla Rust as idents cannot be `_`[^wildcard-ident].)
+In Regent, this can be done by replacing the field identifier with the underscore token `_` as shown below. (This is not possible in vanilla Rust as idents cannot be `_`.[^wildcard-ident])
 
-[^wildcard-ident]: You might object that many grammatical constructs in Rust, like `let` bindings and destructuring patterns, allow `_` to be used like an ident. This is because their syntax accepts a pattern, which can be formed by an ident or `_` (among many other constructions). But in general, an ident cannot be `_`, and this is indeed the case for struct fields.
+[^wildcard-ident]: You might object that many grammatical constructs in Rust, like `let` bindings and destructuring patterns, allow `_` to be used like an ident. This is because their syntax accepts a pattern, which can be formed by an ident or `_` (among many other things). But in general, an ident cannot be `_`, and this is indeed the case for struct fields. (This may change in the future if/when [RFC 2102] `unnamed_fields` is implemented and stabilized; see this [tracking issue][rfc-2102-tracking-issue].)
+
+[RFC 2102]: https://github.com/rust-lang/rfcs/pull/2102
+[rfc-2102-tracking-issue]: https://github.com/rust-lang/rust/issues/49804
 
 ```rust
 #[regent::bitwise(width = 32)]
@@ -271,6 +340,36 @@ pub struct StatusRegister {
     pub im: u8,
     #[const]
     _: u2,          // NEW
+    pub kuo: bool,
+    pub ieo: bool,
+    pub kup: bool,
+    pub iep: bool,
+    pub kuc: bool,
+    pub iec: bool,
+}
+```
+
+A more significant improvement involves the struct fields `cu3`, `cu2`, `cu1`, and `cu0`, which correspond to the register fields of the same name.
+
+```rust
+#[regent::bitwise(width = 32)]
+pub struct StatusRegister {
+    pub cu: [bool; 4..0],      // NEW
+    #[const]
+    _: u2,
+    pub re: bool,
+    #[const]
+    _: u2,
+    pub bev: bool,
+    pub ts: bool,
+    pub pe: bool,
+    pub cm: bool,
+    pub pz: bool,
+    pub swc: bool,
+    pub isc: bool,
+    pub im: u8,
+    #[const]
+    _: u2,
     pub kuo: bool,
     pub ieo: bool,
     pub kup: bool,
