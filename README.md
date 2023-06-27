@@ -198,8 +198,7 @@ A common idiom in Rust is for a fallible function `f` to have `checked_f` and `u
 Regent takes an alternative yet functionally equivalent approach[^fallible-trait] in which the error-handling strategies available to a fallible operation are realized as associated functions of a trait. An existential type[^existential-type] (`impl Trait`) implementing the trait is then produced by an associated function of `T` that stands in for the fallible operation.
 
 [^fallible-trait]: The reasons for this approach were originally based on aesthetic preference of the author (rather than something more important, like genericity or ease of implementation). I would be happy to host discussion of this choice and potential arguments for alternatives in a [GitHub discussion].
-
-[^existential type]: [varkor] gives an excellent introduction to existential types in Rust; see <https://varkor.github.io/blog/2018/07/03/existential-types-in-rust.html>.
+[^existential-type]: [varkor] gives an excellent introduction to existential types in Rust; see <https://varkor.github.io/blog/2018/07/03/existential-types-in-rust.html>.
 
 [GitHub discussion]: https://github.com/norepimorphism/regent/discussions/new?category=general
 [varkor]: https://github.com/varkor
