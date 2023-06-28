@@ -21,7 +21,7 @@ pub mod spec;
 
 pub use regent_internals::bitwise;
 
-/// The trait automatically implemented for items emitted by the [`bitwise!`] macro.
+/// The trait automatically implemented for all items emitted by the [`bitwise!`] macro.
 ///
 /// This trait
 /// - exposes compile-time information about the implementor, including its [field-width] and
@@ -83,9 +83,7 @@ pub trait Bitwise: Sized {
     /// [`FIELD_WIDTH`]: Self::FIELD_WIDTH
     type Repr;
 
-    /// The implementor of [`Fallible`] returned by the [`from_repr`] method.
-    ///
-    /// [`from_repr`]: Self::from_repr
+    #[doc(hidden)]
     type FromReprFallible: Fallible<Output = Self>;
 
     /// Constructs a value of the implementor from a [representation].
@@ -170,6 +168,6 @@ pub trait Fallible {
     unsafe fn unchecked(self) -> Self::Output;
 }
 
-/// An opaque wrapper around `T`.
+#[doc(hidden)]
 #[repr(transparent)]
 pub struct Opaque<T>(T);
