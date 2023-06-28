@@ -1,0 +1,52 @@
+body {
+    font-family: sans-serif;
+    /* Center the body content. */
+    margin: auto;
+}
+
+@media (orientation: portrait) {
+    body {
+        /* In portrait mode (e.g., when viewed on a smartphone), the body element is at 'full
+         * width' with 10% of the viewport width allocated on either side for horizontal padding.
+         */
+        width: 80vw;
+    }
+}
+
+@media (orientation: landscape) {
+    body {
+        /* In landscape mode (e.g., when viewed on a PC), the body width approaches 40% of the
+         * viewport width as the viewport width increases and the viewport height decreases. When
+         * the aspect ratio is close to 1:1 (square), `1vw` is approximately `1vh` and so
+         * `40vw + 40vh` is approximately `80vw`, which maintains continuity with the width rule for
+         * portrait orientation.
+         */
+        width: calc(40vw + 40vh);
+    }
+}
+
+code, pre {
+    font-family: monospace;
+}
+
+/* Top-level headers are centered and all other headers are left-justified. */
+
+h1 {
+    text-align: center;
+}
+
+h2, h3, h4, h5, h6 {
+    text-align: left;
+}
+
+li {
+    /* I think markers are more visible when placed outside the text. */
+    list-style-position: outside;
+}
+
+.warning-box {
+    background-color: #ffcdd2;
+    border-radius: 8px;
+    color: #b71c1c;
+    padding: 10px;
+}
