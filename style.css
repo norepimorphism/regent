@@ -1,38 +1,37 @@
-body {
-    font-family: sans-serif;
-    /* Center the body content. */
-    margin: auto;
+:root {
+    --theme-primary-color: #ffd400;
+    --theme-secondary-color: #ffa200;
 }
 
-@media (orientation: portrait) {
-    body {
-        /* In portrait mode (e.g., when viewed on a smartphone), the body element is at 'full
-         * width' with 10% of the viewport width allocated on either side for horizontal padding.
-         */
-        width: 80vw;
+/* Light color scheme (default). */
+:root {
+    --background-primary-color: white;
+    --background-secondary-color: #f1f1f1;
+    --text-primary-color: black;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --background-primary-color: black;
+        --background-secondary-color: #0e0e0e;
+        --text-primary-color: white;
     }
 }
 
-@media (orientation: landscape) {
-    body {
-        /* In landscape mode (e.g., when viewed on a PC), the body width approaches 40% of the
-         * viewport width as the viewport width increases and the viewport height decreases. When
-         * the aspect ratio is close to 1:1 (square), `1vw` is approximately `1vh` and so
-         * `40vw + 40vh` is approximately `80vw`, which maintains continuity with the width rule for
-         * portrait orientation.
-         */
-        width: calc(40vw + 40vh);
-    }
+a {
+    text-decoration: underline dotted;
+}
+
+a:link {
+    color: var(--theme-primary-color);
+}
+
+a:visited {
+    color: var(--theme-secondary-color);
 }
 
 code, pre {
-    font-family: monospace;
-}
-
-/* Top-level headers are centered and all other headers are left-justified. */
-
-h1 {
-    text-align: center;
+    font-family: "Iosevka", "Monoid", monospace;
 }
 
 h2, h3, h4, h5, h6 {
@@ -44,9 +43,183 @@ li {
     list-style-position: outside;
 }
 
+/* N.B. this rule is currently unused. */
+/* This looks somewhat arcane, but it simply means to indent all elements following a <summary>
+ * until the end of the parent element of <summary>. Because <summary> can only be used as the first
+ * element of <details>, this selector can also be interpreted as "indent all descendants of a
+ * <details> element *except* for the <summary>".
+ */
+ summary ~ * {
+    margin-left: 12px;
+}
+
+body {
+    background-color: var(--background-primary-color);
+    color: var(--text-primary-color);
+    font-family: "Helvetica", "Arial", sans-serif;
+    /* Force all fonts, regardless of family, to be the same size. (I'm looking at you, monospace.)
+     */
+    font-size: 1rem;
+    margin: 0;
+    padding: 0;
+}
+
+body > article {
+    margin: 0;
+    padding: 0;
+}
+
+/* Landscape orientation (default). */
+body > article {
+    display: flex;
+    flex-direction: row;
+}
+
+@media (orientation: portrait) {
+    body > article {
+        column-gap: unset;
+        display: unset;
+        flex-direction: unset;
+    }
+}
+
+#outline {
+    background-color: var(--background-secondary-color);
+    overflow: wrap scroll;
+}
+
+/* Landscape orientation (default). */
+#outline {
+    border-radius: 8px;
+    height: 90vh;
+    margin-left: 10px;
+    padding: 0 10px 0 10px;
+    position: sticky;
+    top: 10px;
+}
+
+@media (orientation: portrait) {
+    #outline {
+        border-radius: unset;
+        height: unset;
+        margin: 0;
+        position: sticky;
+        top: 0;
+        width: 100vw;
+        z-index: 1;
+    }
+
+    body > article > section {
+        z-index: 0;
+    }
+}
+
+#outline ol {
+    margin: 0 0 0 .5em;
+    padding: 0;
+}
+
+#outline li {
+    list-style: none;
+    padding-left: 20px;
+    position: relative;
+}
+
+#outline > ol {
+    margin-left: 0;
+}
+
+#outline > ol > li {
+    padding-left: 0;
+}
+
+#outline > ol > li li {
+    border-left: 2px solid var(--theme-secondary-color);
+}
+
+#outline > ol > li li:last-child {
+    border-left: none;
+}
+
+#outline > ol > li li::before {
+    border-bottom: 2px solid var(--theme-secondary-color);
+    content: "";
+    height: .5em;
+    left: 0;
+    position: absolute;
+    width: 15px;
+}
+
+#outline > ol > li li:last-child::before {
+    border-left: 2px solid var(--theme-secondary-color);
+}
+
+#outline a {
+    color: inherit;
+    text-decoration: none;
+}
+
+#outline a:hover {
+    text-decoration: underline dotted;
+}
+
+body > article > section {
+    padding: 0 50px 0 50px;
+    position: relative;
+}
+
+#github-ribbon {
+    position: absolute;
+    right: 0;
+    top: 0;
+}
+
+body > article > section > header {
+    /* Center the <h1> and <div id=badges> elements. */
+    text-align: center;
+}
+
+body > article > section > header > h1 {
+    margin-bottom: 8px;
+    margin-top: 30px;
+}
+
+body > footer {
+    background-color: var(--background-secondary-color);
+    display: relative;
+}
+
+.info-box,
+.warning-box {
+    border-radius: 8px;
+    border-style: solid;
+    border-width: 1px;
+    margin: 4px 0 4px 0;
+    padding: 10px;
+}
+
+.info-box > div:first-child,
+.warning-box > div:first-child {
+    align-items: center;
+    column-gap: 5px;
+    display: flex;
+    margin-bottom: 8px;
+}
+
+.info-box a,
+.warning-box a {
+    /* Have links inherit their color from the `color` property of the containing box. */
+    color: inherit;
+}
+
+.info-box {
+    background-color: #cce8ff;
+    border-color: #1051a1;
+    color: #1051a1;
+}
+
 .warning-box {
     background-color: #ffcdd2;
-    border-radius: 8px;
-    color: #b71c1c;
-    padding: 10px;
+    border-color: #a11010;
+    color: #a11010;
 }

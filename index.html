@@ -4,87 +4,124 @@
         <title>Regent&mdash;Bitfields in Rust</title>
         <meta charset=utf-8>
         <meta name=author content=norepimorphism>
+        <meta name=color-scheme content="light dark">
+        <meta name=keywords content="rust,bitfield">
+        <meta name=theme-color content="#ffd400">
         <meta name=viewport content="width=device-width">
         <link rel=stylesheet href=style.css>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/languages/rust.min.js"></script>
+        <script src=syntax-highlighting.js></script>
     </head>
     <body>
-        <header>
-            <h1><img alt="Regent. Bitfields in Rust." src="logo-subtitle@0.5x.png"></h1>
-            <div id=badges>
-                <a href="https://crates.io/crates/regent"><img alt="crates.io" src="https://img.shields.io/crates/v/regent"></a>
-                <a href="https://docs.rs/regent/latest/regent"><img alt="docs.rs" src="https://docs.rs/regent/badge.svg"></a>
-                <a href=LICENSE><img alt="MPL-2.0 license" src="https://img.shields.io/github/license/norepimorphism/regent"></a>
-            </div>
-        </header>
-        <main>
-            <div class=warning-box>
-                <strong>Warning</strong>
-                <div>This README is incomplete and describes a version of Regent which is not yet available on <a href="https://crates.io">crates.io</a> (and which differs quite significantly from the version most recently published).</div>
-            </div>
-            <p>*Regent* is an ecosystem of <a href="https://www.rust-lang.org">Rust</a> crates for making bitfield structures. The sole API is the attribute macro <code>#[bitwise]</code>, which generates a struct of bit-packed, arbitrary-width fields with accompanying constructors and accessor functions.</p>
-            <h2>Features</h2>
-            <ul>
-                <li><code>#![no_std]</code></li>
-                <li>Bitfields can be unsigned integers, <code>bool</code>s, unit-only enums, other <code>#[bitwise]</code> structs, or tuples or arrays of those types</li>
-                <li>Associated functions are <code>const fn</code> wherever possible</li>
-                <li>Conversion routines and limited type reflection for <code>#[bitwise]</code> structs are provided by the <code>Bitwise</code> trait</li>
-                <li>No <a href="https://en.wikipedia.org/wiki/Leaky_abstraction">leaky abstractions</a>&mdash;<code>#[bitwise]</code> does not pollute the call-site scope with items that expose implementation details (like <code>mod __private</code>)</li>
-                <li>Minimum supported Rust version (MSRV) is <a href="https://blog.rust-lang.org/2023/01/26/Rust-1.67.0.html">1.67.0</a></li>
-            </ul>
-            <h2>Guided Example</h2>
-            <details>
-                <summary>
-                    <strong>The fastest way to learn Regent is by example.</strong> This section demonstrates a typical use case for Regent, introducing features gradually to approach a succinct and idiomatic solution. Familiarity with Rust is assumed.
-                </summary>
-                <p>The MIPS R3000 is a 32-bit RISC microprocessor. Like many CPUs, the R3000 has a status register (SR) that holds system variables pertaining to the architecture. Here's a diagram of it:</p>
-                <img alt="Diagram of the fields in a 32-bit CPU register." src="mips-r3000-sr.png">
-                <p>Each system variable corresponds to a register *field*, depicted here as a rectangle. Most fields are labeled, but a few enclose the text "0"; these fields are immutable and always read zero. Above each field are the positions of its most- and least-significant bits (or just the position of the field if it is 1-bit). The bit in position 0 is the least-significant bit of the register, and bit 31 is the most significant.</p>
-                <h3>A First Attempt</h3>
-                <p>We can model the SR with the <code>#[bitwise]</code> macro from Regent:</p>
-                <pre>#[regent::bitwise(width = 32)]
-pub struct StatusRegister {
-    pub cu3: bool,
-    pub cu2: bool,
-    pub cu1: bool,
-    pub cu0: bool,
-    #[const]
-    _26: u2,
-    pub re: bool,
-    #[const]
-    _23: u2,
-    pub bev: bool,
-    pub ts: bool,
-    pub pe: bool,
-    pub cm: bool,
-    pub pz: bool,
-    pub swc: bool,
-    pub isc: bool,
-    pub im: u8,
-    #[const]
-    _6: u2,
-    pub kuo: bool,
-    pub ieo: bool,
-    pub kup: bool,
-    pub iep: bool,
-    pub kuc: bool,
-    pub iec: bool,
-}</pre>
-            <h3>Accessor Methods</h3>
-            <h3>The <code>Fallible</code> Trait</h3>
-            <h3>Fine-Tuning</h3>
-            </details>
-            <h2>Prior Art</h2>
-            <p>Regent is very similar to these other crates. Please check them out!</p>
-            <ul>
-                <li><a href="https://crates.io/crates/bilge">bilge</a></li>
-                <li><a href="https://crates.io/crates/bitbybit">bitbybit</a></li>
-                <li><a href="https://crates.io/crates/modular-bitfield">modular-bitfield</a></li>
-            </ul>
-            <h2>Issues</h2>
-            <p>Bug reports, feature requests, and other enhancements are greatly appreciated!</p>
-        </main>
+        <article>
+            <nav id=outline>
+                <h1>Outline</h1>
+                <ol>
+                    <li><a href="#features">Features</a></li>
+                    <li>
+                        <a href="#guided-example">Guided Example</a>
+                        <ol>
+                            <li><a href="#a-first-attempt">A First Attempt</a></li>
+                            <li><a href="#accessor-methods">Accessor Methods</a></li>
+                            <li><a href="#the-fallible-trait">The <code>Fallible</code> Trait</a></li>
+                            <li><a href="#fine-tuning">Fine-Tuning</a></li>
+                        </ol>
+                    </li>
+                    <li><a href="#prior-art">Prior Art</a></li>
+                    <li><a href="#issues">Issues</a></li>
+                </ol>
+            </nav>
+            <section>
+                <div id=github-ribbon>
+                    <a target=_blank href="https://github.com/norepimorphism/regent"><img decoding=async loading=lazy width=149 height=149 src="https://github.blog/wp-content/uploads/2008/12/forkme_right_orange_ff7600.png?resize=149%2C149" alt="Fork me on GitHub" data-recalc-dims=1></a>
+                </div>
+                <header>
+                    <h1><a target=_blank href="https://github.com/norepimorphism/regent"><img alt="Regent. Bitfields in Rust." src="logo-subtitle@0.5x.png"></a></h1>
+                    <div id=badges>
+                        <a href="https://crates.io/crates/regent"><img alt="crates.io" src="https://img.shields.io/crates/v/regent"></a>
+                        <a href="https://docs.rs/regent/latest/regent"><img alt="docs.rs" src="https://docs.rs/regent/badge.svg"></a>
+                        <a href=LICENSE><img alt="MPL-2.0 license" src="https://img.shields.io/github/license/norepimorphism/regent"></a>
+                    </div>
+                </header>
+                <main>
+                    <div class=info-box>
+                        <div><img alt="Info" width=24 height=24 src=icons8-info-50.png><strong>Work in Progress</strong></div>
+                        <div>This README is incomplete and describes a version of Regent which is not yet available on <a href="https://crates.io">crates.io</a> (and which differs quite significantly from the version most recently published).</div>
+                    </div>
+                    <noscript>
+                        <div class=warning-box>
+                            <div><img alt="Warning" width=24 height=24 src=icons8-error-50.png><strong>JavaScript is Unavailable</strong></div>
+                            <div>Automatic syntax highlighting of code blocks on this page will not occur.</div>
+                        </div>
+                    </noscript>
+                    <p><dfn>Regent</dfn> is an ecosystem of <a href="https://www.rust-lang.org">Rust</a> crates for making bitfield structures. The sole API is the attribute macro <code>#[bitwise]</code>, which generates a struct of bit-packed, arbitrary-width fields with accompanying constructors and accessor functions.</p>
+                    <h2 id=features>Features</h2>
+                    <ul>
+                        <li><code>#![no_std]</code></li>
+                        <li>Bitfields can be unsigned integers, <code>bool</code>s, <a href="https://doc.rust-lang.org/reference/items/enumerations.html#unit-only-enum">unit-only enums</a>, other <code>#[bitwise]</code> structs, or tuples or arrays of those types</li>
+                        <li>Associated functions are <code>const fn</code> wherever possible</li>
+                        <li>Conversion routines and limited type reflection for <code>#[bitwise]</code> structs are provided by the automatic <code>Bitwise</code> trait</li>
+                        <li>No <a href="https://en.wikipedia.org/wiki/Leaky_abstraction">leaky abstractions</a>&mdash;<code>#[bitwise]</code> does not pollute the call-site scope with items that expose implementation details (like <code>mod __private</code>)</li>
+                        <li>Minimum supported Rust version (MSRV) is <a href="https://blog.rust-lang.org/2023/01/26/Rust-1.67.0.html">1.67.0</a></li>
+                    </ul>
+                    <h2 id=guided-example>Guided Example</h2>
+                    <p><strong>The fastest way to learn Regent is by example.</strong> This section demonstrates a typical use case for Regent, introducing features gradually to approach a succinct and idiomatic solution. Familiarity with Rust is assumed.</p>
+                    <hr>
+                    <p>The MIPS R3000 is a 32-bit RISC microprocessor. Like many CPUs, the R3000 has a status register (SR) that holds system variables pertaining to the architecture. Here's a diagram of it:</p>
+                    <img alt="Diagram of the fields in a 32-bit CPU register." src="mips-r3000-sr.png">
+                    <p>Each system variable corresponds to a register *field*, depicted here as a rectangle. Most fields are labeled, but a few enclose the text "0"; these fields are immutable and always read zero. Above each field are the positions of its most- and least-significant bits (or just the position of the field if it is 1-bit). The bit in position 0 is the least-significant bit of the register, and bit 31 is the most significant.</p>
+                    <h3 id=a-first-attempt>A First Attempt</h3>
+                    <p>We can model the SR with the <code>#[bitwise]</code> macro from Regent:</p>
+                    <pre><code>#[regent::bitwise(width = 32)]
+        pub struct StatusRegister {
+            pub cu3: bool,
+            pub cu2: bool,
+            pub cu1: bool,
+            pub cu0: bool,
+            #[const]
+            _26: u2,
+            pub re: bool,
+            #[const]
+            _23: u2,
+            pub bev: bool,
+            pub ts: bool,
+            pub pe: bool,
+            pub cm: bool,
+            pub pz: bool,
+            pub swc: bool,
+            pub isc: bool,
+            pub im: u8,
+            #[const]
+            _6: u2,
+            pub kuo: bool,
+            pub ieo: bool,
+            pub kup: bool,
+            pub iep: bool,
+            pub kuc: bool,
+            pub iec: bool,
+        }</code></pre>
+                    <h3 id=accessor-methods>Accessor Methods</h3>
+                    <h3 id=the-fallible-trait>The <code>Fallible</code> Trait</h3>
+                    <h3 id=fine-tuning>Fine-Tuning</h3>
+                    <h2 id=prior-art>Prior Art</h2>
+                    <p>Regent is very similar to these other crates. Please check them out!</p>
+                    <ul>
+                        <li><a href="https://crates.io/crates/bilge">bilge</a></li>
+                        <li><a href="https://crates.io/crates/bitbybit">bitbybit</a></li>
+                        <li><a href="https://crates.io/crates/modular-bitfield">modular-bitfield</a></li>
+                    </ul>
+                    <h2 id=issues>Issues</h2>
+                    <p>Bug reports, feature requests, and other enhancements are greatly appreciated!</p>
+                </main>
+            </section>
+        </article>
         <footer>
-
+            <p>This website contains assets freely downloaded from <a href="https://icons8.com">Icons8</a>:</p>
+            <ul>
+                <li><a href="https://icons8.com/icon/DDOYegec3eVs/info">Info</a> icon</li>
+                <li><a href="https://icons8.com/icon/frMz0bERLVi1/error">Error</a> icon</li>
+            </ul>
         </footer>
     </body>
 </html>
